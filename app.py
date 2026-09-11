@@ -83,37 +83,40 @@ def fetch_finished_orders(token):
 
 def build_display(orders_df, cost_df):
     if orders_df is None or orders_df.empty:
-        return pd.DataFrame(), "No 'Reported as Finished' orders found."
+        return pd.DataFrame(), "No orders found."
     if cost_df is None or cost_df.empty:
         return pd.DataFrame(), "No cost calculation data found."
 
     cols = list(cost_df.columns)
 
-    prod_col  = next((c for c in cols if "collectrefprodid" in c.lower() or "prodid" in c.lower() or "productionordernumber" in c.lower()), None)
-    cost_col  = next((c for c in cols if c.lower() in ("costamount", "totalcostprice", "estimatedcostamount", "costprice")), None)
-    rcost_col = next((c for c in cols if c.lower() in ("realcostamount", "totalrealcostprice", "realizedcostamount", "realcostprice")), None)
+    prod_col  = next((c for c in cols if c == "CollectRefProdId" or "collectrefprodid" in c.lower()), None)
+    cost_col  = next((c for c in cols if c == "CostAmount"), None)
+    rcost_col = next((c for c in cols if c == "RealCostAmount"), None)
 
     if not all([prod_col, cost_col, rcost_col]):
         return pd.DataFrame(), f"Missing columns. Available: {cols}"
 
-    # Debug: if estimated cost is all 0, show actual column names
-
-
     cost_df = cost_df[[prod_col, cost_col, rcost_col]].copy()
     cost_df.rename(columns={prod_col: "ProdId", cost_col: "CostAmount", rcost_col: "RealCostAmount"}, inplace=True)
-    cost_df["CostAmount"]     = pd.to_numeric(cost_df["CostAmount"],     errors="coerce")
-    cost_df["RealCostAmount"] = pd.to_numeric(cost_df["RealCostAmount"], errors="coerce")
+    cost_df["CostAmount"]     = pd.to_numeric(cost_df["CostAmount"],     errors="coerce").fillna(0)
+    cost_df["RealCostAmount"] = pd.to_numeric(cost_df["RealCostAmount"], errors="coerce").fillna(0)
 
-    finished_ids = set(orders_df["ProductionOrderNumber"].astype(str))
-    cost_df = cost_df[cost_df["ProdId"].astype(str).isin(finished_ids)]
+    # Aggregate all item lines per production order
+    agg = cost_df.groupby("ProdId", as_index=False).agg(
+        CostAmount=("CostAmount", "sum"),
+        RealCostAmount=("RealCostAmount", "sum")
+    )
 
-    if cost_df.empty:
-        return pd.DataFrame(), "No match between cost data and finished orders."
+    # Only keep orders that have realized costs (= Reported as Finished)
+    agg = agg[agg["RealCostAmount"] > 0]
 
-    cost_df["Deviation %"] = ((cost_df["RealCostAmount"] - cost_df["CostAmount"]) / cost_df["CostAmount"] * 100).round(2)
-    cost_df["D365 Link"]   = D365_LINK + cost_df["ProdId"].astype(str)
-    cost_df.sort_values("Deviation %", ascending=False, inplace=True, ignore_index=True)
-    return cost_df[["ProdId", "Deviation %", "CostAmount", "RealCostAmount", "D365 Link"]], None
+    if agg.empty:
+        return pd.DataFrame(), "No orders with realized costs found."
+
+    agg["Deviation %"] = ((agg["RealCostAmount"] - agg["CostAmount"]) / agg["CostAmount"].replace(0, float("nan")) * 100).round(2)
+    agg["D365 Link"]   = D365_LINK + agg["ProdId"].astype(str)
+    agg.sort_values("Deviation %", ascending=False, inplace=True, ignore_index=True)
+    return agg[["ProdId", "Deviation %", "CostAmount", "RealCostAmount", "D365 Link"]], None
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
