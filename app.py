@@ -1,4 +1,4 @@
-ï»¿import streamlit as st
+import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime
@@ -105,13 +105,13 @@ def build_display(prod_ids, cost_df):
 # UI
 st.set_page_config(page_title="Comrod - Production Cost Deviation", layout="wide")
 st.title("Comrod - Production Order Cost Deviation")
-st.caption("Status: **Reported as Finished** Â· Estimated vs Realized cost (ProdCalcTransBiEntities)")
+st.caption("Status: **Reported as Finished** · Estimated vs Realized cost (ProdCalcTransBiEntities)")
 
 if st.button("Refresh data"):
     st.cache_data.clear()
 
 @st.cache_data(ttl=300, show_spinner="Fetching data from D365...")
-def load_data():
+def load_data(_v="v6"):
     try:
         token = get_token()
     except Exception as e:
@@ -138,7 +138,7 @@ if err:
     st.stop()
 
 total_rows = len(cost_df) if cost_df is not None else 0
-st.caption(f"Cost rows fetched: {total_rows} Â· RAF orders: {len(prod_ids)}")
+st.caption(f"Cost rows fetched: {total_rows} · RAF orders: {len(prod_ids)}")
 
 min_dev = float(display_df["Deviation %"].min())
 max_dev = float(display_df["Deviation %"].max())
@@ -162,4 +162,4 @@ st.dataframe(
     hide_index=True,
 )
 
-st.caption(f"Showing {len(filtered)} of {len(display_df)} orders Â· Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"Showing {len(filtered)} of {len(display_df)} orders · Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
