@@ -1,6 +1,7 @@
 ﻿import streamlit as st
 import requests
 import pandas as pd
+import io
 from datetime import datetime
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -12,7 +13,6 @@ D365_COMPANY  = "COM"
 D365_LIST_URL = f"{D365_BASE}/?cmp=COM&mi=ProdTableListPage"
 
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
 def get_token():
     url  = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
     data = {
@@ -26,7 +26,6 @@ def get_token():
     return r.json()["access_token"]
 
 
-# ── Data fetch ────────────────────────────────────────────────────────────────
 def fetch_raf_order_ids(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     params = {
@@ -104,6 +103,19 @@ def build_display(prod_ids, cost_df):
     return result[["ProdId", "Deviation %", "CostAmount", "RealCostAmount"]], None
 
 
+def to_excel(df):
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        export = df.copy()
+        export.columns = ["Production Order", "Deviation %", "Estimated Cost", "Realized Cost"]
+        export.to_excel(writer, index=False, sheet_name="Cost Deviation")
+        ws = writer.sheets["Cost Deviation"]
+        for col in ws.columns:
+            max_len = max(len(str(col[0].value)), max((len(str(c.value)) for c in col[1:]), default=0))
+            ws.column_dimensions[col[0].column_letter].width = max_len + 4
+    return buf.getvalue()
+
+
 def render_table(df, d365_url):
     rows_html = ""
     for _, row in df.iterrows():
@@ -111,31 +123,24 @@ def render_table(df, d365_url):
         dev   = f"{row['Deviation %']:.1f}%"
         est   = f"{row['CostAmount']:,.0f}"
         real  = f"{row['RealCostAmount']:,.0f}"
-        color = "color:#c0392b" if row["Deviation %"] > 0 else ("color:#27ae60" if row["Deviation %"] < 0 else "")
-        rows_html += f"""
-        <tr>
-          <td>{pid}</td>
-          <td style="text-align:right;{color}">{dev}</td>
-          <td style="text-align:right">{est}</td>
-          <td style="text-align:right">{real}</td>
-          <td>
-            <button onclick="
-              navigator.clipboard.writeText('{pid}');
-              window.open('{d365_url}','_blank');
-            ">Open</button>
+        color = "color:#c0392b;font-weight:600" if row["Deviation %"] > 0 else ("color:#27ae60;font-weight:600" if row["Deviation %"] < 0 else "")
+        rows_html += f"""<tr>
+          <td style="white-space:nowrap">{pid}</td>
+          <td style="text-align:right;white-space:nowrap;{color}">{dev}</td>
+          <td style="text-align:right;white-space:nowrap">{est}</td>
+          <td style="text-align:right;white-space:nowrap">{real}</td>
+          <td style="white-space:nowrap">
+            <button onclick="navigator.clipboard.writeText('{pid}');window.open('{d365_url}','_blank')">Open</button>
           </td>
         </tr>"""
 
-    html = f"""
+    return f"""
     <style>
-      table {{border-collapse:collapse;width:100%;font-family:sans-serif;font-size:13px}}
-      th {{background:#1f4e79;color:white;padding:6px 10px;text-align:left}}
-      td {{padding:5px 10px;border-bottom:1px solid #ddd}}
+      table {{border-collapse:collapse;font-family:sans-serif;font-size:13px;width:auto}}
+      th {{background:#1f4e79;color:white;padding:6px 12px;text-align:left;white-space:nowrap}}
+      td {{padding:5px 12px;border-bottom:1px solid #ddd}}
       tr:hover td {{background:#f0f4f8}}
-      button {{
-        background:#1f4e79;color:white;border:none;
-        padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px
-      }}
+      button {{background:#1f4e79;color:white;border:none;padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px}}
       button:hover {{background:#2e6da4}}
       button:active {{background:#27ae60}}
     </style>
@@ -148,11 +153,8 @@ def render_table(df, d365_url):
       <tbody>{rows_html}</tbody>
     </table>
     <p style="font-size:11px;color:#888;margin-top:6px">
-      Klik <b>Open</b>: aabner D365 All Production Orders og kopierer ordre-ID til clipboard.
-      Paste (Ctrl+V) i Quick Filter i D365.
-    </p>
-    """
-    return html
+      Klik Open: aabner D365 All Production Orders og kopierer ordre-ID til clipboard. Paste (Ctrl+V) i Quick Filter.
+    </p>"""
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
@@ -164,7 +166,7 @@ if st.button("Refresh data"):
     st.cache_data.clear()
 
 @st.cache_data(ttl=300, show_spinner="Fetching data from D365...")
-def load_data(_v="v14"):
+def load_data(_v="v15"):
     try:
         token = get_token()
     except Exception as e:
@@ -200,7 +202,17 @@ filtered = display_df[(display_df["Deviation %"] < lo) | (display_df["Deviation 
 
 total     = len(display_df)
 out_range = len(filtered)
-st.caption(f"Showing {out_range} orders outside [{lo:.1f}%, {hi:.1f}%] of {total} total . Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+col_info, col_export = st.columns([4, 1])
+with col_info:
+    st.caption(f"Showing {out_range} orders outside [{lo:.1f}%, {hi:.1f}%] of {total} total . Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+with col_export:
+    st.download_button(
+        label="Export til Excel",
+        data=to_excel(filtered),
+        file_name=f"cost_deviation_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 import streamlit.components.v1 as components
-components.html(render_table(filtered, D365_LIST_URL), height=min(60 + len(filtered) * 34, 800), scrolling=True)
+components.html(render_table(filtered, D365_LIST_URL), height=min(80 + len(filtered) * 34, 800), scrolling=True)
