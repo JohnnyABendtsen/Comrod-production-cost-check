@@ -1,60 +1,103 @@
-import streamlit as st
+﻿import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime
 
-# ── Config ────────────────────────────────────────────────────────────────────
 TENANT_ID     = st.secrets.get("TENANT_ID", "")
 CLIENT_ID     = st.secrets.get("CLIENT_ID", "")
 CLIENT_SECRET = st.secrets.get("CLIENT_SECRET", "")
 D365_BASE     = "https://comrodgroup-prod.operations.eu.dynamics.com"
 D365_COMPANY  = "COM"
+DATAVERSE_BASE = st.secrets.get("DATAVERSE_BASE", "https://comrodgroup-prod.crm4.dynamics.com")
 
-def d365_link(prod_id):
-    return f"{D365_BASE}/?cmp=com&mi=ProdTableListPage"
+PROD_ENTITY_CANDIDATES = [
+    "mserp_prodtableentities",
+    "mserp_prodprodtableentities",
+    "mserp_prodtableentity",
+]
 
-# ── Auth ──────────────────────────────────────────────────────────────────────
-def get_token():
+def get_token(scope_base=None):
+    base = scope_base or D365_BASE
     url  = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
     data = {
         "grant_type":    "client_credentials",
         "client_id":     CLIENT_ID,
         "client_secret": CLIENT_SECRET,
-        "scope":         f"{D365_BASE}/.default",
+        "scope":         f"{base}/.default",
     }
     r = requests.post(url, data=data, timeout=15)
     r.raise_for_status()
     return r.json()["access_token"]
 
-# ── Data fetch ────────────────────────────────────────────────────────────────
+def fetch_dataverse_guids(dv_token, prod_ids):
+    headers = {
+        "Authorization": f"Bearer {dv_token}",
+        "Accept": "application/json",
+        "OData-MaxVersion": "4.0",
+        "OData-Version": "4.0",
+    }
+    for entity in PROD_ENTITY_CANDIDATES:
+        test_url = f"{DATAVERSE_BASE}/api/data/v9.2/{entity}?$top=1"
+        r = requests.get(test_url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            continue
+        sample = r.json().get("value", [])
+        if not sample:
+            continue
+        pk_field = f"{entity}id"
+        prod_id_field = None
+        for f in ["mserp_prodid", "mserp_productiornumber", "mserp_itemnumber"]:
+            if f in sample[0]:
+                prod_id_field = f
+                break
+        if not prod_id_field or pk_field not in sample[0]:
+            continue
+        guid_map = {}
+        prod_list = list(prod_ids)
+        for i in range(0, len(prod_list), 50):
+            batch = prod_list[i:i+50]
+            filter_str = " or ".join(f"{prod_id_field} eq '{p}'" for p in batch)
+            url = f"{DATAVERSE_BASE}/api/data/v9.2/{entity}?$filter={filter_str}&$select={pk_field},{prod_id_field}&$top=1000"
+            r = requests.get(url, headers=headers, timeout=30)
+            if r.status_code == 200:
+                for row in r.json().get("value", []):
+                    pid = row.get(prod_id_field)
+                    guid = row.get(pk_field)
+                    if pid and guid:
+                        guid_map[pid] = guid
+        return guid_map, entity
+    return {}, None
+
+def d365_nav_link(prod_id, guid_map, entity_name):
+    if guid_map and prod_id in guid_map and entity_name:
+        guid = guid_map[prod_id]
+        return (f"{D365_BASE}/?cmp=com&mi=action:SysEntityNavigation"
+                f"&entityName={entity_name}&entityGuid={guid}")
+    return f"{D365_BASE}/?cmp=com&mi=ProdTableListPage"
+
 def fetch_raf_order_ids(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     params = {
         "$filter": f"dataAreaId eq '{D365_COMPANY}' and ProductionOrderStatus eq 'ReportedFinished'",
         "$select": "ProductionOrderNumber",
-        "$top":    "10000",
+        "$top": "10000",
     }
-    r = requests.get(f"{D365_BASE}/data/ProductionOrderHeaders",
-                     headers=headers, params=params, timeout=20)
+    r = requests.get(f"{D365_BASE}/data/ProductionOrderHeaders", headers=headers, params=params, timeout=20)
     if r.status_code == 200:
         ids = {row["ProductionOrderNumber"] for row in r.json().get("value", [])}
         if ids:
             return ids, None
-    # Fallback: fetch all, filter in Python
     params = {
         "$filter": f"dataAreaId eq '{D365_COMPANY}'",
         "$select": "ProductionOrderNumber,ProductionOrderStatus",
-        "$top":    "10000",
+        "$top": "10000",
     }
-    r = requests.get(f"{D365_BASE}/data/ProductionOrderHeaders",
-                     headers=headers, params=params, timeout=60)
+    r = requests.get(f"{D365_BASE}/data/ProductionOrderHeaders", headers=headers, params=params, timeout=60)
     if r.status_code != 200:
         return None, f"HTTP {r.status_code}: {r.text[:300]}"
     rows = r.json().get("value", [])
-    ids = {row["ProductionOrderNumber"] for row in rows
-           if row.get("ProductionOrderStatus") == "ReportedFinished"}
+    ids = {row["ProductionOrderNumber"] for row in rows if row.get("ProductionOrderStatus") == "ReportedFinished"}
     return ids, None
-
 
 def fetch_cost_data(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -65,11 +108,10 @@ def fetch_cost_data(token):
         params = {
             "$filter": f"dataAreaId eq '{D365_COMPANY}'",
             "$select": "CollectRefProdId,CostAmount,RealCostAmount",
-            "$top":    str(page_size),
-            "$skip":   str(skip),
+            "$top": str(page_size),
+            "$skip": str(skip),
         }
-        r = requests.get(f"{D365_BASE}/data/ProdCalcTransBiEntities",
-                         headers=headers, params=params, timeout=60)
+        r = requests.get(f"{D365_BASE}/data/ProdCalcTransBiEntities", headers=headers, params=params, timeout=60)
         if r.status_code != 200:
             return None, f"HTTP {r.status_code}: {r.text[:400]}"
         batch = r.json().get("value", [])
@@ -79,8 +121,7 @@ def fetch_cost_data(token):
         skip += page_size
     return pd.DataFrame(all_rows), None
 
-
-def build_display(prod_ids, cost_df):
+def build_display(prod_ids, cost_df, guid_map, entity_name):
     base = pd.DataFrame({"ProdId": sorted(prod_ids)})
     if cost_df is not None and not cost_df.empty:
         df = cost_df.copy()
@@ -101,12 +142,10 @@ def build_display(prod_ids, cost_df):
         (result["RealCostAmount"] - result["CostAmount"])
         / result["CostAmount"].replace(0, float("nan")) * 100
     ).round(2)
-    result["D365 Link"] = result["ProdId"].apply(d365_link)
+    result["D365 Link"] = result["ProdId"].apply(lambda pid: d365_nav_link(pid, guid_map, entity_name))
     result.sort_values("Deviation %", ascending=False, inplace=True, ignore_index=True)
     return result[["ProdId", "Deviation %", "CostAmount", "RealCostAmount", "D365 Link"]], None
 
-
-# ── UI ────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Comrod - Production Cost Deviation", layout="wide")
 st.title("Comrod - Production Order Cost Deviation")
 st.caption("Status: **Reported as Finished** · Shows orders **outside** the deviation range")
@@ -115,20 +154,26 @@ if st.button("Refresh data"):
     st.cache_data.clear()
 
 @st.cache_data(ttl=300, show_spinner="Fetching data from D365...")
-def load_data(_v="v10"):
+def load_data(_v="v12"):
     try:
         token = get_token()
     except Exception as e:
-        return None, None, f"Auth error: {e}"
+        return None, None, {}, None, f"Auth error: {e}"
     prod_ids, err = fetch_raf_order_ids(token)
     if err:
-        return None, None, err
+        return None, None, {}, None, err
     if not prod_ids:
-        return set(), None, None
+        return set(), None, {}, None, None
     cost_df, err2 = fetch_cost_data(token)
-    return prod_ids, cost_df, err2
+    guid_map, entity_name = {}, None
+    try:
+        dv_token = get_token(DATAVERSE_BASE)
+        guid_map, entity_name = fetch_dataverse_guids(dv_token, prod_ids)
+    except Exception:
+        pass
+    return prod_ids, cost_df, guid_map, entity_name, err2
 
-prod_ids, cost_df, warn = load_data()
+prod_ids, cost_df, guid_map, entity_name, warn = load_data()
 if warn:
     st.error(warn)
     st.stop()
@@ -136,19 +181,20 @@ if not prod_ids:
     st.error("No Reported as Finished orders found.")
     st.stop()
 
-display_df, err = build_display(prod_ids, cost_df)
+if entity_name:
+    st.caption(f"Deep links via Dataverse: `{entity_name}`")
+
+display_df, err = build_display(prod_ids, cost_df, guid_map, entity_name)
 if err:
     st.error(err)
     st.stop()
 
-# Default filter: show outliers outside ±10%
 col1, col2 = st.columns(2)
 with col1:
     lo = st.number_input("Min deviation % (show below this)", value=-10.0, step=1.0, format="%.1f")
 with col2:
     hi = st.number_input("Max deviation % (show above this)", value=10.0, step=1.0, format="%.1f")
 
-# Show orders OUTSIDE the range (too low OR too high)
 filtered = display_df[(display_df["Deviation %"] < lo) | (display_df["Deviation %"] > hi)]
 
 st.dataframe(
@@ -167,4 +213,3 @@ st.dataframe(
 total = len(display_df)
 out_range = len(filtered)
 st.caption(f"Showing {out_range} orders outside [{lo:.1f}%, {hi:.1f}%] of {total} total · Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-
