@@ -9,7 +9,7 @@ CLIENT_ID     = st.secrets.get("CLIENT_ID", "")
 CLIENT_SECRET = st.secrets.get("CLIENT_SECRET", "")
 D365_BASE     = "https://comrodgroup-prod.operations.eu.dynamics.com"
 D365_COMPANY  = "COM"
-D365_LINK     = f"{D365_BASE}/?cmp=COM&mi=ProdTableListPage&q="
+D365_LINK     = f"{D365_BASE}/?cmp=com&mi=ProdTableListPage&q="
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 def get_token():
