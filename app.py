@@ -11,11 +11,7 @@ D365_BASE     = "https://comrodgroup-prod.operations.eu.dynamics.com"
 D365_COMPANY  = "COM"
 
 def d365_link(prod_id):
-    # Opens All Production Orders list page with ProdId pre-filled as filter
-    return (
-        f"{D365_BASE}/?cmp=com&mi=ProdTableListPage"
-        f"&DefaultFilterFieldName=ProdId&DefaultFilterFieldValue={prod_id}&DefaultFilterFieldApplied=true"
-    )
+    return f"{D365_BASE}/?cmp=com&mi=ProdTableListPage"
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 def get_token():
