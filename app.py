@@ -1,4 +1,4 @@
-import streamlit as st
+ï»¿import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime
@@ -18,7 +18,6 @@ def get_token():
     r.raise_for_status()
     return r.json()["access_token"]
 
-
 def fetch_raf_order_ids(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     params = {
@@ -32,7 +31,6 @@ def fetch_raf_order_ids(token):
         ids = {row["ProductionOrderNumber"] for row in r.json().get("value", [])}
         if ids:
             return ids, None
-    # Fallback: fetch all, filter in Python
     params = {
         "$filter": f"dataAreaId eq '{D365_COMPANY}'",
         "$select": "ProductionOrderNumber,ProductionOrderStatus",
@@ -47,9 +45,7 @@ def fetch_raf_order_ids(token):
            if row.get("ProductionOrderStatus") == "ReportedFinished"}
     return ids, None
 
-
 def fetch_cost_data(token):
-    """Paginate through all ProdCalcTransBiEntities for this company; join is done in Python."""
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     all_rows = []
     skip = 0
@@ -72,19 +68,14 @@ def fetch_cost_data(token):
         skip += page_size
     return pd.DataFrame(all_rows), None
 
-
 def build_display(prod_ids, cost_df):
     if cost_df is None or cost_df.empty:
         return pd.DataFrame(), "No cost data found."
-
     df = cost_df.copy()
     df.rename(columns={"CollectRefProdId": "ProdId"}, inplace=True)
     df["CostAmount"]     = pd.to_numeric(df["CostAmount"],     errors="coerce").fillna(0)
     df["RealCostAmount"] = pd.to_numeric(df["RealCostAmount"], errors="coerce").fillna(0)
-
-    # Join: keep only RAF orders
     df = df[df["ProdId"].isin(prod_ids)]
-
     agg = df.groupby("ProdId", as_index=False).agg(
         CostAmount=("CostAmount", "sum"),
         RealCostAmount=("RealCostAmount", "sum")
@@ -92,7 +83,6 @@ def build_display(prod_ids, cost_df):
     agg = agg[agg["RealCostAmount"] > 0]
     if agg.empty:
         return pd.DataFrame(), "No RAF orders with realized costs found."
-
     agg["Deviation %"] = (
         (agg["RealCostAmount"] - agg["CostAmount"])
         / agg["CostAmount"].replace(0, float("nan")) * 100
@@ -101,17 +91,15 @@ def build_display(prod_ids, cost_df):
     agg.sort_values("Deviation %", ascending=False, inplace=True, ignore_index=True)
     return agg[["ProdId", "Deviation %", "CostAmount", "RealCostAmount", "D365 Link"]], None
 
-
-# UI
 st.set_page_config(page_title="Comrod - Production Cost Deviation", layout="wide")
 st.title("Comrod - Production Order Cost Deviation")
-st.caption("Status: **Reported as Finished** · Estimated vs Realized cost (ProdCalcTransBiEntities)")
+st.caption("Status: **Reported as Finished** Â· Estimated vs Realized cost (ProdCalcTransBiEntities)")
 
 if st.button("Refresh data"):
     st.cache_data.clear()
 
 @st.cache_data(ttl=300, show_spinner="Fetching data from D365...")
-def load_data(_v="v6"):
+def load_data(_v="v7"):
     try:
         token = get_token()
     except Exception as e:
@@ -137,8 +125,8 @@ if err:
     st.error(err)
     st.stop()
 
-total_rows = len(cost_df) if cost_df is not None else 0
-st.caption(f"Cost rows fetched: {total_rows} · RAF orders: {len(prod_ids)}")
+total_cost_rows = len(cost_df) if cost_df is not None else 0
+st.info(f"Cost rows fetched: {total_cost_rows} | RAF orders: {len(prod_ids)} | Orders with costs: {len(display_df)}")
 
 min_dev = float(display_df["Deviation %"].min())
 max_dev = float(display_df["Deviation %"].max())
@@ -161,5 +149,4 @@ st.dataframe(
     },
     hide_index=True,
 )
-
-st.caption(f"Showing {len(filtered)} of {len(display_df)} orders · Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"Showing {len(filtered)} of {len(display_df)} orders | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
