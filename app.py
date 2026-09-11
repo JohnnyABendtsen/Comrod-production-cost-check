@@ -143,7 +143,7 @@ st.markdown("""<style>
 div[data-testid="stNumberInput"] { max-width: 200px; }
 </style>""", unsafe_allow_html=True)
 
-pass  # buttons below
+
 
 @st.cache_data(ttl=300, show_spinner="Fetching data from D365...")
 def load_data(_v="v17"):
@@ -190,6 +190,7 @@ st.download_button(
 
 components.html(render_table(filtered, D365_LIST_URL),
                 height=min(80 + len(filtered) * 34, 800), scrolling=True)
+
 
 
 
