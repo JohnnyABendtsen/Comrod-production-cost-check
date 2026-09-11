@@ -69,37 +69,42 @@ def fetch_cost_data(token):
     return pd.DataFrame(all_rows), None
 
 def build_display(prod_ids, cost_df):
-    if cost_df is None or cost_df.empty:
-        return pd.DataFrame(), "No cost data found."
-    df = cost_df.copy()
-    df.rename(columns={"CollectRefProdId": "ProdId"}, inplace=True)
-    df["CostAmount"]     = pd.to_numeric(df["CostAmount"],     errors="coerce").fillna(0)
-    df["RealCostAmount"] = pd.to_numeric(df["RealCostAmount"], errors="coerce").fillna(0)
-    df = df[df["ProdId"].isin(prod_ids)]
-    agg = df.groupby("ProdId", as_index=False).agg(
-        CostAmount=("CostAmount", "sum"),
-        RealCostAmount=("RealCostAmount", "sum")
-    )
-    agg = agg[agg["RealCostAmount"] > 0]
-    if agg.empty:
-        return pd.DataFrame(), "No RAF orders with realized costs found."
-    agg["Deviation %"] = (
-        (agg["RealCostAmount"] - agg["CostAmount"])
-        / agg["CostAmount"].replace(0, float("nan")) * 100
+    # Start with all RAF orders
+    base = pd.DataFrame({"ProdId": sorted(prod_ids)})
+
+    if cost_df is not None and not cost_df.empty:
+        df = cost_df.copy()
+        df.rename(columns={"CollectRefProdId": "ProdId"}, inplace=True)
+        df["CostAmount"]     = pd.to_numeric(df["CostAmount"],     errors="coerce").fillna(0)
+        df["RealCostAmount"] = pd.to_numeric(df["RealCostAmount"], errors="coerce").fillna(0)
+        df = df[df["ProdId"].isin(prod_ids)]
+        agg = df.groupby("ProdId", as_index=False).agg(
+            CostAmount=("CostAmount", "sum"),
+            RealCostAmount=("RealCostAmount", "sum")
+        )
+        result = base.merge(agg, on="ProdId", how="left").fillna(0)
+    else:
+        result = base.copy()
+        result["CostAmount"]     = 0.0
+        result["RealCostAmount"] = 0.0
+
+    result["Deviation %"] = (
+        (result["RealCostAmount"] - result["CostAmount"])
+        / result["CostAmount"].replace(0, float("nan")) * 100
     ).round(2)
-    agg["D365 Link"] = D365_LINK + agg["ProdId"].astype(str)
-    agg.sort_values("Deviation %", ascending=False, inplace=True, ignore_index=True)
-    return agg[["ProdId", "Deviation %", "CostAmount", "RealCostAmount", "D365 Link"]], None
+    result["D365 Link"] = D365_LINK + result["ProdId"].astype(str)
+    result.sort_values("Deviation %", ascending=False, inplace=True, ignore_index=True)
+    return result[["ProdId", "Deviation %", "CostAmount", "RealCostAmount", "D365 Link"]], None
 
 st.set_page_config(page_title="Comrod - Production Cost Deviation", layout="wide")
 st.title("Comrod - Production Order Cost Deviation")
-st.caption("Status: **Reported as Finished** · Estimated vs Realized cost (ProdCalcTransBiEntities)")
+st.caption("Status: **Reported as Finished** · Estimated vs Realized cost")
 
 if st.button("Refresh data"):
     st.cache_data.clear()
 
 @st.cache_data(ttl=300, show_spinner="Fetching data from D365...")
-def load_data(_v="v7"):
+def load_data(_v="v8"):
     try:
         token = get_token()
     except Exception as e:
@@ -124,9 +129,6 @@ display_df, err = build_display(prod_ids, cost_df)
 if err:
     st.error(err)
     st.stop()
-
-total_cost_rows = len(cost_df) if cost_df is not None else 0
-st.info(f"Cost rows fetched: {total_cost_rows} | RAF orders: {len(prod_ids)} | Orders with costs: {len(display_df)}")
 
 min_dev = float(display_df["Deviation %"].min())
 max_dev = float(display_df["Deviation %"].max())
