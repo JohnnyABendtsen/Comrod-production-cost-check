@@ -183,6 +183,7 @@ rb_col, ex_col, _ = st.columns([1, 1, 8])
 with rb_col:
     if st.button("Refresh data"):
         st.cache_data.clear()
+        st.rerun()
 with ex_col:
     st.download_button(
         label="⬇️ Export to Excel",
@@ -193,3 +194,4 @@ with ex_col:
 
 components.html(render_table(filtered, D365_LIST_URL),
                 height=min(80 + len(filtered) * 34, 800), scrolling=True)
+
