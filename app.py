@@ -137,11 +137,16 @@ st.set_page_config(page_title="Comrod - Production Cost Deviation", layout="wide
 st.title("Comrod - Production Order Cost Deviation")
 st.caption("Status: **Reported as Finished** · Shows orders **outside** the deviation range")
 
+# Narrow the number inputs with CSS
+st.markdown("""<style>
+div[data-testid="stNumberInput"] { max-width: 200px; }
+</style>""", unsafe_allow_html=True)
+
 if st.button("Refresh data"):
     st.cache_data.clear()
 
 @st.cache_data(ttl=300, show_spinner="Fetching data from D365...")
-def load_data(_v="v16"):
+def load_data(_v="v17"):
     try:
         token = get_token()
     except Exception as e:
@@ -164,11 +169,11 @@ if not prod_ids:
 
 display_df = build_display(prod_ids, cost_df)
 
-col1, col2 = st.columns(2)
+col1, col2 = st.columns([1, 9])
 with col1:
-    lo = st.number_input("Min deviation % (show below this)", value=-10.0, step=1.0, format="%.1f")
+    lo = st.number_input("Min dev %", value=-10.0, step=1.0, format="%.1f")
 with col2:
-    hi = st.number_input("Max deviation % (show above this)", value=10.0, step=1.0, format="%.1f")
+    hi = st.number_input("Max dev %", value=10.0, step=1.0, format="%.1f")
 
 filtered = display_df[(display_df["Deviation %"] < lo) | (display_df["Deviation %"] > hi)].reset_index(drop=True)
 
