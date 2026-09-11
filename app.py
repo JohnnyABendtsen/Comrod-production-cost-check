@@ -9,7 +9,7 @@ CLIENT_ID     = st.secrets.get("CLIENT_ID", "")
 CLIENT_SECRET = st.secrets.get("CLIENT_SECRET", "")
 D365_BASE     = "https://comrodgroup-prod.operations.eu.dynamics.com"
 D365_COMPANY  = "COM"
-D365_LINK     = f"{D365_BASE}/?cmp=com&mi=ProdTable&q=ProdId%3D"
+D365_LINK     = f"{D365_BASE}/?cmp=COM&mi=ProdTable&q=ProdId%3D"
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 def get_token():
@@ -90,11 +90,14 @@ def build_display(orders_df, cost_df):
     cols = list(cost_df.columns)
 
     prod_col  = next((c for c in cols if "collectrefprodid" in c.lower() or "prodid" in c.lower() or "productionordernumber" in c.lower()), None)
-    cost_col  = next((c for c in cols if c.lower() == "costamount"), None)
-    rcost_col = next((c for c in cols if c.lower() == "realcostamount"), None)
+    cost_col  = next((c for c in cols if c.lower() in ("costamount", "totalcostprice", "estimatedcostamount", "costprice")), None)
+    rcost_col = next((c for c in cols if c.lower() in ("realcostamount", "totalrealcostprice", "realizedcostamount", "realcostprice")), None)
 
     if not all([prod_col, cost_col, rcost_col]):
         return pd.DataFrame(), f"Missing columns. Available: {cols}"
+
+    # Debug: if estimated cost is all 0, show actual column names
+
 
     cost_df = cost_df[[prod_col, cost_col, rcost_col]].copy()
     cost_df.rename(columns={prod_col: "ProdId", cost_col: "CostAmount", rcost_col: "RealCostAmount"}, inplace=True)
@@ -144,12 +147,15 @@ elif warn:
 if orders_df is None:
     st.stop()
 
+# Always show actual field names and first row values for debugging
+if cost_df is not None and not cost_df.empty:
+    with st.expander("🔍 Debug: ProdCalcTransBiEntities columns + first row"):
+        st.json(cost_df.iloc[0].to_dict())
+
 display_df, err = build_display(orders_df, cost_df)
 
 if err:
     st.error(err)
-    if cost_df is not None and not cost_df.empty:
-        st.info(f"Columns in ProdCalcTransBiEntities: {list(cost_df.columns)}")
     st.stop()
 
 st.dataframe(
