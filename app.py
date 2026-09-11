@@ -54,7 +54,7 @@ def fetch_raf_order_ids(token):
     rows = r.json().get("value", [])
     distinct = sorted({row.get("ProductionOrderStatus", "") for row in rows})
     ids = {row["ProductionOrderNumber"] for row in rows
-           if row.get("ProductionOrderStatus") == "ReportedAsFinished"}
+           if row.get("ProductionOrderStatus") == "ReportedFinished"}
     return ids, distinct, None
 
 
