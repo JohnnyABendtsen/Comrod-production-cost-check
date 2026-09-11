@@ -20,9 +20,8 @@ def get_token():
 
 
 def fetch_raf_order_ids(token):
-    """Fetch all ReportedFinished production order IDs."""
+    """Fetch all ReportedFinished production order IDs (server-side filter)."""
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    # Try server-side filter first
     params = {
         "$filter": f"dataAreaId eq '{D365_COMPANY}' and ProductionOrderStatus eq 'ReportedFinished'",
         "$select": "ProductionOrderNumber",
@@ -31,11 +30,10 @@ def fetch_raf_order_ids(token):
     r = requests.get(f"{D365_BASE}/data/ProductionOrderHeaders",
                      headers=headers, params=params, timeout=20)
     if r.status_code == 200:
-        ids = [row["ProductionOrderNumber"] for row in r.json().get("value", [])]
+        ids = {row["ProductionOrderNumber"] for row in r.json().get("value", [])}
         if ids:
             return ids, None
-
-    # Fallback: fetch all, filter in Python
+    # Fallback: fetch all + Python filter
     params = {
         "$filter": f"dataAreaId eq '{D365_COMPANY}'",
         "$select": "ProductionOrderNumber,ProductionOrderStatus",
@@ -46,42 +44,45 @@ def fetch_raf_order_ids(token):
     if r.status_code != 200:
         return None, f"HTTP {r.status_code}: {r.text[:300]}"
     rows = r.json().get("value", [])
-    ids = [row["ProductionOrderNumber"] for row in rows
-           if row.get("ProductionOrderStatus") == "ReportedFinished"]
+    ids = {row["ProductionOrderNumber"] for row in rows
+           if row.get("ProductionOrderStatus") == "ReportedFinished"}
     return ids, None
 
 
-def fetch_cost_data(token, prod_ids):
-    """Fetch ProdCostTrans at Level=0 for the given production order IDs."""
+def fetch_cost_data(token):
+    """Fetch all ProdCostTrans at Level=0 for this company (paginated), join with RAF IDs in Python."""
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     all_rows = []
-    chunk_size = 30  # keep URL length reasonable
-    for i in range(0, len(prod_ids), chunk_size):
-        chunk = prod_ids[i:i + chunk_size]
-        id_filter = " or ".join(f"ProdId eq '{pid}'" for pid in chunk)
+    skip = 0
+    page_size = 5000
+    while True:
         params = {
-            "$filter": f"dataAreaId eq '{D365_COMPANY}' and Level eq 0 and ({id_filter})",
-            "$top":    "5000",
+            "$filter": f"dataAreaId eq '{D365_COMPANY}' and Level eq 0",
+            "$top":    str(page_size),
+            "$skip":   str(skip),
         }
         r = requests.get(f"{D365_BASE}/data/ProdCostTrans",
-                         headers=headers, params=params, timeout=30)
+                         headers=headers, params=params, timeout=60)
         if r.status_code == 404:
             return None, "Entity ProdCostTrans not found - check entity name"
         if r.status_code != 200:
             return None, f"HTTP {r.status_code}: {r.text[:400]}"
-        all_rows.extend(r.json().get("value", []))
+        batch = r.json().get("value", [])
+        all_rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        skip += page_size
     return pd.DataFrame(all_rows), None
 
 
-def build_display(cost_df):
+def build_display(prod_ids, cost_df):
     if cost_df is None or cost_df.empty:
         return pd.DataFrame(), f"No cost data. Columns: {list(cost_df.columns) if cost_df is not None else 'N/A'}"
 
     cols = list(cost_df.columns)
-    # Show columns in debug
     prod_col  = next((c for c in cols if c.lower() == "prodid"), None)
-    cost_col  = next((c for c in cols if c.lower() in ("costamount", "qty")), None)
-    rcost_col = next((c for c in cols if c.lower() in ("realcostamount", "realqty")), None)
+    cost_col  = next((c for c in cols if c.lower() == "costamount"), None)
+    rcost_col = next((c for c in cols if c.lower() == "realcostamount"), None)
 
     if not all([prod_col, cost_col, rcost_col]):
         return pd.DataFrame(), f"Missing columns. Available: {cols}"
@@ -91,13 +92,16 @@ def build_display(cost_df):
     df["CostAmount"]     = pd.to_numeric(df["CostAmount"],     errors="coerce").fillna(0)
     df["RealCostAmount"] = pd.to_numeric(df["RealCostAmount"], errors="coerce").fillna(0)
 
+    # Join: keep only RAF orders
+    df = df[df["ProdId"].isin(prod_ids)]
+
     agg = df.groupby("ProdId", as_index=False).agg(
         CostAmount=("CostAmount", "sum"),
         RealCostAmount=("RealCostAmount", "sum")
     )
     agg = agg[agg["RealCostAmount"] > 0]
     if agg.empty:
-        return pd.DataFrame(), "No orders with realized costs found."
+        return pd.DataFrame(), "No RAF orders with realized costs found."
 
     agg["Deviation %"] = (
         (agg["RealCostAmount"] - agg["CostAmount"])
@@ -126,8 +130,8 @@ def load_data():
     if err:
         return None, None, err
     if not prod_ids:
-        return [], None, None
-    cost_df, err2 = fetch_cost_data(token, prod_ids)
+        return set(), None, None
+    cost_df, err2 = fetch_cost_data(token)
     return prod_ids, cost_df, err2
 
 prod_ids, cost_df, warn = load_data()
@@ -141,12 +145,11 @@ if not prod_ids:
     st.error("No Reported as Finished orders found.")
     st.stop()
 
-# Debug: show columns from ProdCostTrans on first load
 if cost_df is not None and not cost_df.empty:
-    with st.expander(f"Debug: ProdCostTrans columns ({len(cost_df)} rows for {len(prod_ids)} orders)"):
+    with st.expander(f"Debug: ProdCostTrans columns ({len(cost_df)} rows)"):
         st.write(list(cost_df.columns))
 
-display_df, err = build_display(cost_df)
+display_df, err = build_display(prod_ids, cost_df)
 if err:
     st.error(err)
     st.stop()
