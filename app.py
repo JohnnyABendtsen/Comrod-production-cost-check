@@ -11,7 +11,9 @@ D365_BASE     = "https://comrodgroup-prod.operations.eu.dynamics.com"
 D365_COMPANY  = "COM"
 D365_LINK     = f"{D365_BASE}/?cmp=COM&mi=ProdTableListPage&q=ProdId%3D"
 
-# Auth
+# RAF statuses: ReportedFinished = RAF not yet ended; Completed = Reported as Ended (UI)
+RAF_STATUSES = {"ReportedFinished", "Completed"}
+
 def get_token():
     url  = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
     data = {
@@ -24,60 +26,71 @@ def get_token():
     r.raise_for_status()
     return r.json()["access_token"]
 
-# Data fetch
+
 def fetch_raf_order_ids(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     company_filter = f"dataAreaId eq '{D365_COMPANY}'"
 
-    for status_val in ["ReportedFinished",
-                       "Microsoft.Dynamics.DataEntities.ProdStatus'ReportedFinished'"]:
-        try:
-            params = {
-                "$filter": f"{company_filter} and ProductionOrderStatus eq '{status_val}'",
-                "$select": "ProductionOrderNumber",
-                "$top":    "5000",
-            }
-            r = requests.get(f"{D365_BASE}/data/ProductionOrderHeaders",
-                             headers=headers, params=params, timeout=10)
-            if r.status_code == 200:
-                ids = {row["ProductionOrderNumber"] for row in r.json().get("value", [])}
-                if ids:
-                    return ids, None
-        except requests.exceptions.Timeout:
-            pass
+    # Try server-side filter for both statuses
+    status_filter = "ProductionOrderStatus eq 'ReportedFinished' or ProductionOrderStatus eq 'Completed'"
+    try:
+        params = {
+            "$filter": f"{company_filter} and ({status_filter})",
+            "$select": "ProductionOrderNumber",
+            "$top":    "10000",
+        }
+        r = requests.get(f"{D365_BASE}/data/ProductionOrderHeaders",
+                         headers=headers, params=params, timeout=15)
+        if r.status_code == 200:
+            ids = {row["ProductionOrderNumber"] for row in r.json().get("value", [])}
+            if ids:
+                return ids, None
+    except requests.exceptions.Timeout:
+        pass
 
     # Fallback: fetch all, filter in Python
     params = {
         "$filter": company_filter,
         "$select": "ProductionOrderNumber,ProductionOrderStatus",
-        "$top":    "5000",
+        "$top":    "10000",
     }
     r = requests.get(f"{D365_BASE}/data/ProductionOrderHeaders",
-                     headers=headers, params=params, timeout=30)
+                     headers=headers, params=params, timeout=60)
     if r.status_code != 200:
         return None, f"HTTP {r.status_code}: {r.text[:300]}"
     rows = r.json().get("value", [])
     ids = {row["ProductionOrderNumber"] for row in rows
-           if row.get("ProductionOrderStatus") == "ReportedFinished"}
+           if row.get("ProductionOrderStatus") in RAF_STATUSES}
     return ids, None
 
 
 def fetch_cost_data(token):
+    """Fetch cost data with pagination to handle large datasets."""
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    params = {
-        "$filter": f"dataAreaId eq '{D365_COMPANY}'",
-        "$top":    "5000",
-    }
-    r = requests.get(f"{D365_BASE}/data/ProdCalcTransBiEntities",
-                     headers=headers, params=params, timeout=60)
-    if r.status_code != 200:
-        return None, f"HTTP {r.status_code}: {r.text[:400]}"
-    return pd.DataFrame(r.json().get("value", [])), None
+    all_rows = []
+    skip = 0
+    page_size = 5000
+    while True:
+        params = {
+            "$filter": f"dataAreaId eq '{D365_COMPANY}'",
+            "$top":    str(page_size),
+            "$skip":   str(skip),
+        }
+        r = requests.get(f"{D365_BASE}/data/ProdCalcTransBiEntities",
+                         headers=headers, params=params, timeout=60)
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}: {r.text[:400]}"
+        batch = r.json().get("value", [])
+        all_rows.extend(batch)
+        if len(batch) < page_size:
+            break
+        skip += page_size
+    return pd.DataFrame(all_rows), None
 
 
 def build_display(prod_ids, cost_df):
     if not prod_ids:
-        return pd.DataFrame(), "No Reported as Finished orders found."
+        return pd.DataFrame(), "No RAF orders found."
     if cost_df is None or cost_df.empty:
         return pd.DataFrame(), "No cost calculation data found."
 
@@ -114,7 +127,7 @@ def build_display(prod_ids, cost_df):
 # UI
 st.set_page_config(page_title="Comrod - Production Cost Deviation", layout="wide")
 st.title("Comrod - Production Order Cost Deviation")
-st.caption("Status: **Reported as Finished** · Compares Estimated cost vs Realized cost amount")
+st.caption("Status: **Reported as Finished / Ended** · Compares Estimated cost vs Realized cost amount")
 
 if st.button("Refresh data"):
     st.cache_data.clear()
@@ -136,7 +149,7 @@ if warn:
     st.error(warn)
     st.stop()
 if not prod_ids:
-    st.error("No Reported as Finished orders found.")
+    st.error("No Reported as Finished/Ended orders found.")
     st.stop()
 
 display_df, err = build_display(prod_ids, cost_df)
