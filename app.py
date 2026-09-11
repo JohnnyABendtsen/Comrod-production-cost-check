@@ -143,8 +143,13 @@ st.markdown("""<style>
 div[data-testid="stNumberInput"] { max-width: 200px; }
 </style>""", unsafe_allow_html=True)
 
+# Read lo/hi from URL params (set by JS redirect from localStorage on fresh load)
+qp = st.query_params
+_lo_default = float(qp.get("lo", -10.0))
+_hi_default = float(qp.get("hi",  10.0))
+
 @st.cache_data(ttl=300, show_spinner="Fetching data from D365...")
-def load_data(_v="v22"):
+def load_data(_v="v27"):
     try:
         token = get_token()
     except Exception as e:
@@ -169,9 +174,37 @@ display_df = build_display(prod_ids, cost_df)
 
 col1, col2 = st.columns([1, 9])
 with col1:
-    lo = st.number_input("Min dev %", value=-10.0, step=1.0, format="%.1f")
+    lo = st.number_input("Min dev %", value=_lo_default, step=1.0, format="%.1f")
 with col2:
-    hi = st.number_input("Max dev %", value=10.0, step=1.0, format="%.1f")
+    hi = st.number_input("Max dev %", value=_hi_default, step=1.0, format="%.1f")
+
+# Persist current values to URL + localStorage via JS
+st.query_params["lo"] = str(lo)
+st.query_params["hi"] = str(hi)
+
+# JS: save params to localStorage; on fresh load (no params) redirect from localStorage
+components.html(f"""
+<script>
+(function(){{
+  try {{
+    var parent = window.parent;
+    var p = new URLSearchParams(parent.location.search);
+    if (p.has('lo')) {{
+      // URL has values - save to localStorage
+      parent.localStorage.setItem('dev_lo', p.get('lo'));
+      parent.localStorage.setItem('dev_hi', p.get('hi') || '10.0');
+    }} else {{
+      // No URL params - check localStorage and redirect
+      var slo = parent.localStorage.getItem('dev_lo');
+      var shi = parent.localStorage.getItem('dev_hi');
+      if (slo !== null && shi !== null) {{
+        parent.location.href = parent.location.pathname + '?lo=' + slo + '&hi=' + shi;
+      }}
+    }}
+  }} catch(e) {{}}
+}})();
+</script>
+""", height=1)
 
 filtered = display_df[(display_df["Deviation %"] < lo) | (display_df["Deviation %"] > hi)].reset_index(drop=True)
 
@@ -194,7 +227,3 @@ with ex_col:
 
 components.html(render_table(filtered, D365_LIST_URL),
                 height=min(80 + len(filtered) * 34, 800), scrolling=True)
-
-
-
-
