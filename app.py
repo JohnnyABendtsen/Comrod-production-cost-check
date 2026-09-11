@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime
@@ -9,7 +9,13 @@ CLIENT_ID     = st.secrets.get("CLIENT_ID", "")
 CLIENT_SECRET = st.secrets.get("CLIENT_SECRET", "")
 D365_BASE     = "https://comrodgroup-prod.operations.eu.dynamics.com"
 D365_COMPANY  = "COM"
-D365_LINK     = f"{D365_BASE}/?cmp=com&mi=ProdTableListPage&q="
+
+def d365_link(prod_id):
+    # Opens All Production Orders list page with ProdId pre-filled as filter
+    return (
+        f"{D365_BASE}/?cmp=com&mi=ProdTableListPage"
+        f"&DefaultFilterFieldName=ProdId&DefaultFilterFieldValue={prod_id}"
+    )
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 def get_token():
@@ -99,7 +105,7 @@ def build_display(prod_ids, cost_df):
         (result["RealCostAmount"] - result["CostAmount"])
         / result["CostAmount"].replace(0, float("nan")) * 100
     ).round(2)
-    result["D365 Link"] = D365_LINK + result["ProdId"].astype(str)
+    result["D365 Link"] = result["ProdId"].apply(d365_link)
     result.sort_values("Deviation %", ascending=False, inplace=True, ignore_index=True)
     return result[["ProdId", "Deviation %", "CostAmount", "RealCostAmount", "D365 Link"]], None
 
@@ -113,7 +119,7 @@ if st.button("Refresh data"):
     st.cache_data.clear()
 
 @st.cache_data(ttl=300, show_spinner="Fetching data from D365...")
-def load_data(_v="v9"):
+def load_data(_v="v10"):
     try:
         token = get_token()
     except Exception as e:
