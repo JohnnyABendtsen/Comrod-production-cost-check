@@ -133,20 +133,18 @@ def render_table(df, d365_url):
 <tbody>{rows_html}</tbody>
 </table>"""
 
+# ── UI ────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Comrod - Production Cost Deviation", layout="wide")
 st.title("Comrod - Production Order Cost Deviation")
 st.markdown("## Powered by Inspirit365")
 st.caption("Status: **Reported as Finished** · Shows orders **outside** the deviation range")
 
-# Narrow the number inputs with CSS
 st.markdown("""<style>
 div[data-testid="stNumberInput"] { max-width: 200px; }
 </style>""", unsafe_allow_html=True)
 
-
-
 @st.cache_data(ttl=300, show_spinner="Fetching data from D365...")
-def load_data(_v="v17"):
+def load_data(_v="v22"):
     try:
         token = get_token()
     except Exception as e:
@@ -181,16 +179,17 @@ total     = len(display_df)
 out_range = len(filtered)
 st.caption(f"Showing {out_range} orders outside [{lo:.1f}%, {hi:.1f}%] of {total} total · Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
 
-st.download_button(
-    label="⬇️ Export to Excel",
-    data=to_excel(filtered),
-    file_name=f"cost_deviation_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-)
+rb_col, ex_col, _ = st.columns([1, 1, 8])
+with rb_col:
+    if st.button("Refresh data"):
+        st.cache_data.clear()
+with ex_col:
+    st.download_button(
+        label="⬇️ Export to Excel",
+        data=to_excel(filtered),
+        file_name=f"cost_deviation_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
 components.html(render_table(filtered, D365_LIST_URL),
                 height=min(80 + len(filtered) * 34, 800), scrolling=True)
-
-
-
-
