@@ -24,62 +24,59 @@ def get_token():
     r.raise_for_status()
     return r.json()["access_token"]
 
-# ── Data fetch ────────────────────────────────────────────────────────────────
+# ── Fetch RAF order IDs ───────────────────────────────────────────────────────
 def fetch_raf_order_ids(token):
-    """Returns (set_of_ids, distinct_statuses_for_debug, error)."""
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    base    = f"dataAreaId eq '{D365_COMPANY}'"
-
-    # Try server-side filter first (two enum syntax variants)
+    base = f"dataAreaId eq '{D365_COMPANY}'"
+    # Try server-side filter (fast path)
     for flt in [
-        "ProductionOrderStatus eq 'ReportedAsFinished'",
-        "ProductionOrderStatus eq Microsoft.Dynamics.DataEntities.ProdStatus'ReportedAsFinished'",
+        "ProductionOrderStatus eq 'ReportedFinished'",
+        "ProductionOrderStatus eq Microsoft.Dynamics.DataEntities.ProdStatus'ReportedFinished'",
     ]:
         try:
             url = (f"{D365_BASE}/data/ProductionOrderHeaders"
-                   f"?$filter={base} and {flt}&$select=ProductionOrderNumber&$top=5000")
+                   f"?={base} and {flt}&=ProductionOrderNumber&=5000")
             r = requests.get(url, headers=headers, timeout=10)
             if r.status_code == 200:
                 ids = {row["ProductionOrderNumber"] for row in r.json().get("value", [])}
-                return ids, None, None
+                if ids:
+                    return ids, None
         except requests.exceptions.Timeout:
-            pass  # Try next syntax
-
-    # Fallback: fetch all (2 lightweight columns), filter in Python
+            pass
+    # Fallback: fetch all, filter in Python
     url = (f"{D365_BASE}/data/ProductionOrderHeaders"
-           f"?$filter={base}&$select=ProductionOrderNumber,ProductionOrderStatus&$top=5000")
+           f"?={base}&=ProductionOrderNumber,ProductionOrderStatus&=5000")
     r = requests.get(url, headers=headers, timeout=30)
     if r.status_code != 200:
-        return None, None, f"HTTP {r.status_code}: {r.text[:300]}"
+        return None, f"HTTP {r.status_code}: {r.text[:300]}"
     rows = r.json().get("value", [])
-    distinct = sorted({row.get("ProductionOrderStatus", "") for row in rows})
     ids = {row["ProductionOrderNumber"] for row in rows
            if row.get("ProductionOrderStatus") == "ReportedFinished"}
-    return ids, distinct, None
+    return ids, None
 
-
-def fetch_cost_data(token, prod_ids):
-    """Fetch cost transactions only for the given production order IDs."""
+# ── Fetch ALL cost data, join with RAF IDs in Python ─────────────────────────
+def fetch_cost_data(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    all_rows = []
-    id_list  = list(prod_ids)
-    for i in range(0, len(id_list), 50):
-        chunk    = id_list[i:i + 50]
-        id_flt   = " or ".join(f"CollectRefProdId eq '{pid}'" for pid in chunk)
-        url      = (f"{D365_BASE}/data/ProdCalcTransBiEntities"
-                    f"?$filter=dataAreaId eq '{D365_COMPANY}' and ({id_flt})&$top=5000")
-        r = requests.get(url, headers=headers, timeout=30)
-        if r.status_code != 200:
-            return None, f"HTTP {r.status_code}: {r.text[:400]}"
-        all_rows.extend(r.json().get("value", []))
-    return pd.DataFrame(all_rows), None
+    url = (f"{D365_BASE}/data/ProdCalcTransBiEntities"
+           f"?=dataAreaId eq '{D365_COMPANY}'"
+           f"&=5000")
+    r = requests.get(url, headers=headers, timeout=60)
+    if r.status_code != 200:
+        return None, f"HTTP {r.status_code}: {r.text[:400]}"
+    return pd.DataFrame(r.json().get("value", [])), None
 
+# ── Build display dataframe ───────────────────────────────────────────────────
+def build_display(prod_ids, cost_df):
+    if not prod_ids:
+        return pd.DataFrame(), "No Reported as Finished orders found."
+    if cost_df is None or cost_df.empty:
+        return pd.DataFrame(), "No cost calculation data found."
 
-def build_display(cost_df):
     cols      = list(cost_df.columns)
     prod_col  = next((c for c in cols if "collectrefprodid" in c.lower()), None)
     cost_col  = next((c for c in cols if c == "CostAmount"), None)
     rcost_col = next((c for c in cols if c == "RealCostAmount"), None)
+
     if not all([prod_col, cost_col, rcost_col]):
         return pd.DataFrame(), f"Missing columns. Available: {cols}"
 
@@ -88,18 +85,23 @@ def build_display(cost_df):
     df["CostAmount"]     = pd.to_numeric(df["CostAmount"],     errors="coerce").fillna(0)
     df["RealCostAmount"] = pd.to_numeric(df["RealCostAmount"], errors="coerce").fillna(0)
 
+    # Filter to RAF orders only
+    df = df[df["ProdId"].astype(str).isin({str(i) for i in prod_ids})]
+
     agg = df.groupby("ProdId", as_index=False).agg(
         CostAmount=("CostAmount", "sum"),
         RealCostAmount=("RealCostAmount", "sum")
     )
+    # Only orders with realized costs
+    agg = agg[agg["RealCostAmount"] > 0]
+
     if agg.empty:
-        return pd.DataFrame(), "No cost data found."
+        return pd.DataFrame(), "No RAF orders with realized costs found."
 
     agg["Deviation %"] = ((agg["RealCostAmount"] - agg["CostAmount"]) / agg["CostAmount"].replace(0, float("nan")) * 100).round(2)
     agg["D365 Link"]   = D365_LINK + agg["ProdId"].astype(str)
     agg.sort_values("Deviation %", ascending=False, inplace=True, ignore_index=True)
     return agg[["ProdId", "Deviation %", "CostAmount", "RealCostAmount", "D365 Link"]], None
-
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Comrod - Production Cost Deviation", layout="wide")
@@ -114,18 +116,14 @@ def load_data():
     try:
         token = get_token()
     except Exception as e:
-        return None, None, None, f"Auth error: {e}"
-
-    prod_ids, distinct_statuses, err = fetch_raf_order_ids(token)
+        return None, None, f"Auth error: {e}"
+    prod_ids, err = fetch_raf_order_ids(token)
     if err:
-        return None, None, None, err
-    if not prod_ids:
-        return set(), None, distinct_statuses, None
+        return None, None, err
+    cost_df, err2 = fetch_cost_data(token)
+    return prod_ids, cost_df, err2
 
-    cost_df, err2 = fetch_cost_data(token, prod_ids)
-    return prod_ids, cost_df, distinct_statuses, err2
-
-prod_ids, cost_df, distinct_statuses, warn = load_data()
+prod_ids, cost_df, warn = load_data()
 
 if warn:
     st.error(warn)
@@ -135,26 +133,32 @@ if not prod_ids:
     st.error("No Reported as Finished orders found.")
     st.stop()
 
-if cost_df is None or cost_df.empty:
-    st.error("No cost data found for the fetched orders.")
-    st.stop()
-
-display_df, err = build_display(cost_df)
+display_df, err = build_display(prod_ids, cost_df)
 if err:
     st.error(err)
     st.stop()
 
+# ── Deviation filter ──────────────────────────────────────────────────────────
+min_dev = float(display_df["Deviation %"].min())
+max_dev = float(display_df["Deviation %"].max())
+col1, col2 = st.columns(2)
+with col1:
+    lo = st.number_input("Min deviation %", value=round(min_dev, 2), step=1.0, format="%.2f")
+with col2:
+    hi = st.number_input("Max deviation %", value=round(max_dev, 2), step=1.0, format="%.2f")
+filtered = display_df[(display_df["Deviation %"] >= lo) & (display_df["Deviation %"] <= hi)]
+
 st.dataframe(
-    display_df,
+    filtered,
     use_container_width=True,
     column_config={
-        "D365 Link":      st.column_config.LinkColumn("Production Order", display_text="Open in D365"),
-        "Deviation %":    st.column_config.NumberColumn(format="%.2f %%"),
-        "CostAmount":     st.column_config.NumberColumn("Estimated Cost",  format="%.2f"),
-        "RealCostAmount": st.column_config.NumberColumn("Realized Cost",   format="%.2f"),
+        "ProdId":         st.column_config.TextColumn("Order", width="small"),
+        "Deviation %":    st.column_config.NumberColumn("Deviation %", format="%.2f %%", width="small"),
+        "CostAmount":     st.column_config.NumberColumn("Estimated Cost", format="%.2f", width="medium"),
+        "RealCostAmount": st.column_config.NumberColumn("Realized Cost",  format="%.2f", width="medium"),
+        "D365 Link":      st.column_config.LinkColumn("Production Order", display_text="Open in D365", width="small"),
     },
     hide_index=True,
 )
 
-st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
+st.caption(f"Showing {len(filtered)} of {len(display_df)} orders · Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
