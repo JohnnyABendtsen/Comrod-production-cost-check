@@ -1,6 +1,5 @@
 ﻿import streamlit as st
 import requests
-from datetime import datetime
 
 TENANT_ID     = st.secrets.get("TENANT_ID", "")
 CLIENT_ID     = st.secrets.get("CLIENT_ID", "")
@@ -15,27 +14,16 @@ def get_token():
     r.raise_for_status()
     return r.json()["access_token"]
 
-@st.cache_data(ttl=300, show_spinner="Fetching entity list...")
+@st.cache_data(ttl=300, show_spinner="Fetching...")
 def fetch_entities():
     token = get_token()
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     r = requests.get(f"{D365_BASE}/data", headers=headers, timeout=30)
-    if r.status_code != 200:
-        return None, f"HTTP {r.status_code}"
-    data = r.json()
-    entities = [e["name"] for e in data.get("value", [])]
-    prod_cost = sorted([e for e in entities if "prod" in e.lower() and "cost" in e.lower()])
-    prod_calc = sorted([e for e in entities if "prod" in e.lower() and "calc" in e.lower()])
-    return {"prod+cost": prod_cost, "prod+calc": prod_calc}, None
+    entities = [e["name"] for e in r.json().get("value", [])]
+    return sorted([e for e in entities if "prod" in e.lower() and "trans" in e.lower()])
 
 st.set_page_config(page_title="Entity Search", layout="wide")
-st.title("D365 Entity Search: prod+cost / prod+calc")
-
-result, err = fetch_entities()
-if err:
-    st.error(err)
-else:
-    st.subheader("prod + cost")
-    st.write(result["prod+cost"])
-    st.subheader("prod + calc")
-    st.write(result["prod+calc"])
+st.title("D365 entities: prod + trans")
+result = fetch_entities()
+for e in result:
+    st.write(e)
