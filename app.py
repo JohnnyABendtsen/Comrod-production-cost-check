@@ -70,7 +70,7 @@ def fetch_finished_orders(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     url = (
         f"{D365_BASE}/data/ProductionOrderHeaders"
-        f"?$filter=dataAreaId eq '{D365_COMPANY}' and ProductionOrderStatus eq Microsoft.Dynamics.DataEntities.ProdStatus'ReportedAsFinished'"
+        f"?$filter=dataAreaId eq '{D365_COMPANY}' and ProductionOrderStatus eq 3"
         f"&$select=ProductionOrderNumber,ItemNumber"
         f"&$top=5000"
     )
