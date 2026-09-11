@@ -14,7 +14,7 @@ def d365_link(prod_id):
     # Opens All Production Orders list page with ProdId pre-filled as filter
     return (
         f"{D365_BASE}/?cmp=com&mi=ProdTableListPage"
-        f"&DefaultFilterFieldName=ProdId&DefaultFilterFieldValue={prod_id}"
+        f"&DefaultFilterFieldName=ProdId&DefaultFilterFieldValue={prod_id}&DefaultFilterFieldApplied=true"
     )
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -171,3 +171,4 @@ st.dataframe(
 total = len(display_df)
 out_range = len(filtered)
 st.caption(f"Showing {out_range} orders outside [{lo:.1f}%, {hi:.1f}%] of {total} total · Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
