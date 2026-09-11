@@ -1,4 +1,4 @@
-import streamlit as st
+﻿import streamlit as st
 import requests
 import pandas as pd
 from datetime import datetime
@@ -35,12 +35,15 @@ def fetch_raf_order_ids(token):
         "ProductionOrderStatus eq 'ReportedAsFinished'",
         "ProductionOrderStatus eq Microsoft.Dynamics.DataEntities.ProdStatus'ReportedAsFinished'",
     ]:
-        url = (f"{D365_BASE}/data/ProductionOrderHeaders"
-               f"?$filter={base} and {flt}&$select=ProductionOrderNumber&$top=5000")
-        r = requests.get(url, headers=headers, timeout=30)
-        if r.status_code == 200:
-            ids = {row["ProductionOrderNumber"] for row in r.json().get("value", [])}
-            return ids, None, None
+        try:
+            url = (f"{D365_BASE}/data/ProductionOrderHeaders"
+                   f"?$filter={base} and {flt}&$select=ProductionOrderNumber&$top=5000")
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code == 200:
+                ids = {row["ProductionOrderNumber"] for row in r.json().get("value", [])}
+                return ids, None, None
+        except requests.exceptions.Timeout:
+            pass  # Try next syntax
 
     # Fallback: fetch all (2 lightweight columns), filter in Python
     url = (f"{D365_BASE}/data/ProductionOrderHeaders"
@@ -99,14 +102,14 @@ def build_display(cost_df):
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Comrod – Production Cost Deviation", layout="wide")
-st.title("🏭 Comrod – Production Order Cost Deviation")
+st.set_page_config(page_title="Comrod - Production Cost Deviation", layout="wide")
+st.title("Comrod - Production Order Cost Deviation")
 st.caption("Status: **Reported as Finished** · Compares Estimated cost vs Realized cost amount")
 
-if st.button("🔄 Refresh data"):
+if st.button("Refresh data"):
     st.cache_data.clear()
 
-@st.cache_data(ttl=300, show_spinner="Fetching data from D365…")
+@st.cache_data(ttl=300, show_spinner="Fetching data from D365...")
 def load_data():
     try:
         token = get_token()
@@ -130,11 +133,11 @@ if warn:
 
 # Debug: show actual status values if server-side filter failed
 if distinct_statuses is not None:
-    with st.expander("🔍 Debug: distinct ProductionOrderStatus values from D365"):
+    with st.expander("Debug: distinct ProductionOrderStatus values from D365"):
         st.write(distinct_statuses)
 
 if not prod_ids:
-    st.error("No 'Reported as Finished' orders found.")
+    st.error("No Reported as Finished orders found.")
     st.stop()
 
 if cost_df is None or cost_df.empty:
@@ -150,7 +153,7 @@ st.dataframe(
     display_df,
     use_container_width=True,
     column_config={
-        "D365 Link":      st.column_config.LinkColumn("Production Order", display_text="🔗 Open in D365"),
+        "D365 Link":      st.column_config.LinkColumn("Production Order", display_text="Open in D365"),
         "Deviation %":    st.column_config.NumberColumn(format="%.2f %%"),
         "CostAmount":     st.column_config.NumberColumn("Estimated Cost",  format="%.2f"),
         "RealCostAmount": st.column_config.NumberColumn("Realized Cost",   format="%.2f"),
