@@ -3,21 +3,28 @@ import requests
 import pandas as pd
 from datetime import datetime
 
+# ── Config ────────────────────────────────────────────────────────────────────
 TENANT_ID     = st.secrets.get("TENANT_ID", "")
 CLIENT_ID     = st.secrets.get("CLIENT_ID", "")
 CLIENT_SECRET = st.secrets.get("CLIENT_SECRET", "")
 D365_BASE     = "https://comrodgroup-prod.operations.eu.dynamics.com"
 D365_COMPANY  = "COM"
-D365_LINK     = f"{D365_BASE}/?cmp=COM&mi=ProdTableListPage&q=ProdId%3D"
+D365_LINK     = f"{D365_BASE}/?cmp=COM&mi=ProdTableListPage&q="
 
+# ── Auth ──────────────────────────────────────────────────────────────────────
 def get_token():
     url  = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
-    data = {"grant_type": "client_credentials", "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET, "scope": f"{D365_BASE}/.default"}
+    data = {
+        "grant_type":    "client_credentials",
+        "client_id":     CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "scope":         f"{D365_BASE}/.default",
+    }
     r = requests.post(url, data=data, timeout=15)
     r.raise_for_status()
     return r.json()["access_token"]
 
+# ── Data fetch ────────────────────────────────────────────────────────────────
 def fetch_raf_order_ids(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     params = {
@@ -31,6 +38,7 @@ def fetch_raf_order_ids(token):
         ids = {row["ProductionOrderNumber"] for row in r.json().get("value", [])}
         if ids:
             return ids, None
+    # Fallback: fetch all, filter in Python
     params = {
         "$filter": f"dataAreaId eq '{D365_COMPANY}'",
         "$select": "ProductionOrderNumber,ProductionOrderStatus",
@@ -44,6 +52,7 @@ def fetch_raf_order_ids(token):
     ids = {row["ProductionOrderNumber"] for row in rows
            if row.get("ProductionOrderStatus") == "ReportedFinished"}
     return ids, None
+
 
 def fetch_cost_data(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -68,10 +77,9 @@ def fetch_cost_data(token):
         skip += page_size
     return pd.DataFrame(all_rows), None
 
-def build_display(prod_ids, cost_df):
-    # Start with all RAF orders
-    base = pd.DataFrame({"ProdId": sorted(prod_ids)})
 
+def build_display(prod_ids, cost_df):
+    base = pd.DataFrame({"ProdId": sorted(prod_ids)})
     if cost_df is not None and not cost_df.empty:
         df = cost_df.copy()
         df.rename(columns={"CollectRefProdId": "ProdId"}, inplace=True)
@@ -87,7 +95,6 @@ def build_display(prod_ids, cost_df):
         result = base.copy()
         result["CostAmount"]     = 0.0
         result["RealCostAmount"] = 0.0
-
     result["Deviation %"] = (
         (result["RealCostAmount"] - result["CostAmount"])
         / result["CostAmount"].replace(0, float("nan")) * 100
@@ -96,15 +103,17 @@ def build_display(prod_ids, cost_df):
     result.sort_values("Deviation %", ascending=False, inplace=True, ignore_index=True)
     return result[["ProdId", "Deviation %", "CostAmount", "RealCostAmount", "D365 Link"]], None
 
+
+# ── UI ────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Comrod - Production Cost Deviation", layout="wide")
 st.title("Comrod - Production Order Cost Deviation")
-st.caption("Status: **Reported as Finished** · Estimated vs Realized cost")
+st.caption("Status: **Reported as Finished** · Shows orders **outside** the deviation range")
 
 if st.button("Refresh data"):
     st.cache_data.clear()
 
 @st.cache_data(ttl=300, show_spinner="Fetching data from D365...")
-def load_data(_v="v8"):
+def load_data(_v="v9"):
     try:
         token = get_token()
     except Exception as e:
@@ -130,26 +139,29 @@ if err:
     st.error(err)
     st.stop()
 
-min_dev = float(display_df["Deviation %"].min())
-max_dev = float(display_df["Deviation %"].max())
+# Default filter: show outliers outside ±10%
 col1, col2 = st.columns(2)
 with col1:
-    lo = st.number_input("Min deviation %", value=round(min_dev, 2), step=1.0, format="%.2f")
+    lo = st.number_input("Min deviation % (show below this)", value=-10.0, step=1.0, format="%.1f")
 with col2:
-    hi = st.number_input("Max deviation %", value=round(max_dev, 2), step=1.0, format="%.2f")
-filtered = display_df[(display_df["Deviation %"] >= lo) & (display_df["Deviation %"] <= hi)]
+    hi = st.number_input("Max deviation % (show above this)", value=10.0, step=1.0, format="%.1f")
+
+# Show orders OUTSIDE the range (too low OR too high)
+filtered = display_df[(display_df["Deviation %"] < lo) | (display_df["Deviation %"] > hi)]
 
 st.dataframe(
     filtered,
     use_container_width=True,
     column_config={
-        "ProdId":         st.column_config.TextColumn("Order",           width="small"),
-        "Deviation %":    st.column_config.NumberColumn("Deviation %",   format="%.2f %%", width="small"),
-        "CostAmount":     st.column_config.NumberColumn("Estimated Cost", format="%.2f",    width="medium"),
-        "RealCostAmount": st.column_config.NumberColumn("Realized Cost",  format="%.2f",    width="medium"),
-        "D365 Link":      st.column_config.LinkColumn("Production Order", display_text="Open in D365", width="small"),
+        "ProdId":         st.column_config.TextColumn("Order",      width="small"),
+        "Deviation %":    st.column_config.NumberColumn("Dev %",    format="%.1f %%", width="small"),
+        "CostAmount":     st.column_config.NumberColumn("Estimated", format="%.0f",   width="small"),
+        "RealCostAmount": st.column_config.NumberColumn("Realized",  format="%.0f",   width="small"),
+        "D365 Link":      st.column_config.LinkColumn("D365",        display_text="Open", width="small"),
     },
     hide_index=True,
 )
-st.caption(f"Showing {len(filtered)} of {len(display_df)} orders | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
+total = len(display_df)
+out_range = len(filtered)
+st.caption(f"Showing {out_range} orders outside [{lo:.1f}%, {hi:.1f}%] of {total} total · Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
