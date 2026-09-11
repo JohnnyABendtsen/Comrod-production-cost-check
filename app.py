@@ -135,7 +135,7 @@ def render_table(df, d365_url):
 
 st.set_page_config(page_title="Comrod - Production Cost Deviation", layout="wide")
 st.title("Comrod - Production Order Cost Deviation")
-st.caption("Powered by Inspirit365")
+st.markdown("## Powered by Inspirit365")
 st.caption("Status: **Reported as Finished** · Shows orders **outside** the deviation range")
 
 # Narrow the number inputs with CSS
@@ -191,3 +191,4 @@ st.download_button(
 
 components.html(render_table(filtered, D365_LIST_URL),
                 height=min(80 + len(filtered) * 34, 800), scrolling=True)
+
