@@ -131,11 +131,6 @@ if warn:
     st.error(warn)
     st.stop()
 
-# Debug: show actual status values if server-side filter failed
-if distinct_statuses is not None:
-    with st.expander("Debug: distinct ProductionOrderStatus values from D365"):
-        st.write(distinct_statuses)
-
 if not prod_ids:
     st.error("No Reported as Finished orders found.")
     st.stop()
@@ -162,3 +157,4 @@ st.dataframe(
 )
 
 st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
