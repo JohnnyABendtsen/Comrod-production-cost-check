@@ -28,7 +28,6 @@ def get_token():
 def fetch_cost_data(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-    # First: fetch 1 row to discover available column names
     probe = requests.get(
         f"{D365_BASE}/data/ProdCalcTransBiEntities?$top=1&$filter=dataAreaId eq '{D365_COMPANY}'",
         headers=headers, timeout=15
@@ -42,20 +41,11 @@ def fetch_cost_data(token):
 
     all_cols = list(sample[0].keys())
 
-    # Detect the ProdId column
     prod_col = next((c for c in all_cols if "prodid" in c.lower() or "collectref" in c.lower() or "productionorder" in c.lower()), None)
-
-    # Detect a "type/level" column to filter only the Production summary row
     type_col = next((c for c in all_cols if c.lower() in ("reftype", "transtype", "costgrouptype", "type", "linetype")), None)
 
-    # Build filter
     base_filter = f"dataAreaId eq '{D365_COMPANY}'"
-    if type_col:
-        # Try filtering for production-level row (value 0 or 'Production')
-        # We'll try string 'Production' first; adjust if it fails
-        type_filter = f" and {type_col} eq 'Production'"
-    else:
-        type_filter = ""
+    type_filter = f" and {type_col} eq 'Production'" if type_col else ""
 
     url = (
         f"{D365_BASE}/data/ProdCalcTransBiEntities"
@@ -65,14 +55,12 @@ def fetch_cost_data(token):
     r = requests.get(url, headers=headers, timeout=30)
 
     if r.status_code != 200:
-        # If type filter failed, retry without it and return columns for debugging
         url_no_filter = f"{D365_BASE}/data/ProdCalcTransBiEntities?$filter={base_filter}&$top=5000"
         r2 = requests.get(url_no_filter, headers=headers, timeout=30)
         if r2.status_code != 200:
             return None, f"HTTP {r2.status_code}: {r2.text[:400]}"
         df = pd.DataFrame(r2.json().get("value", []))
-        df["_debug_columns"] = str(all_cols)
-        return df, f"⚠️ Type-filter virkede ikke — viser alle rækker. Kolonner: {all_cols}"
+        return df, f"⚠️ Type filter failed — showing all rows. Columns: {all_cols}"
 
     df = pd.DataFrame(r.json().get("value", []))
     return df, None
@@ -82,7 +70,7 @@ def fetch_finished_orders(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     url = (
         f"{D365_BASE}/data/ProductionOrderHeaders"
-        f"?$filter=dataAreaId eq '{D365_COMPANY}' and ProductionOrderStatus eq 'ReportedAsFinished'"
+        f"?$filter=dataAreaId eq '{D365_COMPANY}' and ProductionOrderStatus eq Microsoft.Dynamics.DataEntities.ProdStatus'ReportedAsFinished'"
         f"&$select=ProductionOrderNumber,ItemNumber"
         f"&$top=5000"
     )
@@ -94,9 +82,9 @@ def fetch_finished_orders(token):
 
 def build_display(orders_df, cost_df):
     if orders_df is None or orders_df.empty:
-        return pd.DataFrame(), "Ingen 'Reported as Finished' ordrer fundet."
+        return pd.DataFrame(), "No 'Reported as Finished' orders found."
     if cost_df is None or cost_df.empty:
-        return pd.DataFrame(), "Ingen kalkulationsdata fundet."
+        return pd.DataFrame(), "No cost calculation data found."
 
     cols = list(cost_df.columns)
 
@@ -105,39 +93,39 @@ def build_display(orders_df, cost_df):
     rcost_col = next((c for c in cols if c.lower() == "realcostamount"), None)
 
     if not all([prod_col, cost_col, rcost_col]):
-        return pd.DataFrame(), f"Mangler kolonner. Tilgængelige: {cols}"
+        return pd.DataFrame(), f"Missing columns. Available: {cols}"
 
     cost_df = cost_df[[prod_col, cost_col, rcost_col]].copy()
     cost_df.rename(columns={prod_col: "ProdId", cost_col: "CostAmount", rcost_col: "RealCostAmount"}, inplace=True)
-    cost_df["CostAmount"]  = pd.to_numeric(cost_df["CostAmount"],  errors="coerce")
+    cost_df["CostAmount"]     = pd.to_numeric(cost_df["CostAmount"],     errors="coerce")
     cost_df["RealCostAmount"] = pd.to_numeric(cost_df["RealCostAmount"], errors="coerce")
 
     finished_ids = set(orders_df["ProductionOrderNumber"].astype(str))
     cost_df = cost_df[cost_df["ProdId"].astype(str).isin(finished_ids)]
 
     if cost_df.empty:
-        return pd.DataFrame(), "Ingen match mellem kalkulationsdata og færdige ordrer."
+        return pd.DataFrame(), "No match between cost data and finished orders."
 
-    cost_df["Afvigelse %"] = ((cost_df["RealCostAmount"] - cost_df["CostAmount"]) / cost_df["CostAmount"] * 100).round(2)
+    cost_df["Deviation %"] = ((cost_df["RealCostAmount"] - cost_df["CostAmount"]) / cost_df["CostAmount"] * 100).round(2)
     cost_df["D365 Link"]   = D365_LINK + cost_df["ProdId"].astype(str)
-    cost_df.sort_values("Afvigelse %", ascending=False, inplace=True, ignore_index=True)
-    return cost_df[["ProdId", "Afvigelse %", "CostAmount", "RealCostAmount", "D365 Link"]], None
+    cost_df.sort_values("Deviation %", ascending=False, inplace=True, ignore_index=True)
+    return cost_df[["ProdId", "Deviation %", "CostAmount", "RealCostAmount", "D365 Link"]], None
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Comrod – Kostpris Afvigelse", layout="wide")
-st.title("🏭 Comrod – Produktionsordre Kostpris Afvigelse")
-st.caption("Status: **Reported as Finished** · Sammenligner Estimated cost vs Realized cost amount")
+st.set_page_config(page_title="Comrod – Production Cost Deviation", layout="wide")
+st.title("🏭 Comrod – Production Order Cost Deviation")
+st.caption("Status: **Reported as Finished** · Compares Estimated cost vs Realized cost amount")
 
-if st.button("🔄 Opdater data"):
+if st.button("🔄 Refresh data"):
     st.cache_data.clear()
 
-@st.cache_data(ttl=300, show_spinner="Henter data fra D365…")
+@st.cache_data(ttl=300, show_spinner="Fetching data from D365…")
 def load_data():
     try:
         token = get_token()
     except Exception as e:
-        return None, None, f"Auth fejl: {e}"
+        return None, None, f"Auth error: {e}"
     orders_df, e1 = fetch_finished_orders(token)
     if e1:
         return None, None, e1
@@ -160,19 +148,19 @@ display_df, err = build_display(orders_df, cost_df)
 if err:
     st.error(err)
     if cost_df is not None and not cost_df.empty:
-        st.info(f"Kolonner i ProdCalcTransBiEntities: {list(cost_df.columns)}")
+        st.info(f"Columns in ProdCalcTransBiEntities: {list(cost_df.columns)}")
     st.stop()
 
 st.dataframe(
     display_df,
     use_container_width=True,
     column_config={
-        "D365 Link":      st.column_config.LinkColumn("Prod Ordre", display_text="🔗 Åbn i D365"),
-        "Afvigelse %":    st.column_config.NumberColumn(format="%.2f %%"),
-        "CostAmount":     st.column_config.NumberColumn("Estimeret kostpris",  format="%.2f"),
-        "RealCostAmount": st.column_config.NumberColumn("Realiseret kostpris", format="%.2f"),
+        "D365 Link":      st.column_config.LinkColumn("Production Order", display_text="🔗 Open in D365"),
+        "Deviation %":    st.column_config.NumberColumn(format="%.2f %%"),
+        "CostAmount":     st.column_config.NumberColumn("Estimated Cost",  format="%.2f"),
+        "RealCostAmount": st.column_config.NumberColumn("Realized Cost",   format="%.2f"),
     },
     hide_index=True,
 )
 
-st.caption(f"Sidst opdateret: {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}")
+st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
