@@ -70,14 +70,15 @@ def fetch_finished_orders(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     url = (
         f"{D365_BASE}/data/ProductionOrderHeaders"
-        f"?$filter=dataAreaId eq '{D365_COMPANY}' and ProductionOrderStatus eq 3"
-        f"&$select=ProductionOrderNumber,ItemNumber"
+        f"?$filter=dataAreaId eq '{D365_COMPANY}'"
+        f"&$select=ProductionOrderNumber,ItemNumber,ProductionOrderStatus"
         f"&$top=5000"
     )
     r = requests.get(url, headers=headers, timeout=30)
     if r.status_code != 200:
         return None, f"HTTP {r.status_code}: {r.text[:300]}"
-    return pd.DataFrame(r.json().get("value", [])), None
+    df = pd.DataFrame(r.json().get("value", []))
+    return df, None
 
 
 def build_display(orders_df, cost_df):
