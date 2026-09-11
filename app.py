@@ -9,8 +9,7 @@ CLIENT_ID     = st.secrets.get("CLIENT_ID", "")
 CLIENT_SECRET = st.secrets.get("CLIENT_SECRET", "")
 D365_BASE     = "https://comrodgroup-prod.operations.eu.dynamics.com"
 D365_COMPANY  = "COM"
-
-HELPER_PORT = 9999  # d365_helper.py skal koere lokalt paa brugerens maskine
+D365_LIST_URL = f"{D365_BASE}/?cmp=COM&mi=ProdTableListPage"
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -27,11 +26,6 @@ def get_token():
     return r.json()["access_token"]
 
 
-def d365_nav_link(prod_id):
-    # Kalder lokal d365_helper.py som finder D365-vinduet og saetter filteret
-    return f"http://localhost:{HELPER_PORT}/open?prodid={prod_id}"
-
-
 # ── Data fetch ────────────────────────────────────────────────────────────────
 def fetch_raf_order_ids(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
@@ -46,7 +40,6 @@ def fetch_raf_order_ids(token):
         ids = {row["ProductionOrderNumber"] for row in r.json().get("value", [])}
         if ids:
             return ids, None
-    # Fallback: fetch all, filter i Python
     params = {
         "$filter": f"dataAreaId eq '{D365_COMPANY}'",
         "$select": "ProductionOrderNumber,ProductionOrderStatus",
@@ -107,9 +100,59 @@ def build_display(prod_ids, cost_df):
         (result["RealCostAmount"] - result["CostAmount"])
         / result["CostAmount"].replace(0, float("nan")) * 100
     ).round(2)
-    result["D365 Link"] = result["ProdId"].apply(d365_nav_link)
     result.sort_values("Deviation %", ascending=False, inplace=True, ignore_index=True)
-    return result[["ProdId", "Deviation %", "CostAmount", "RealCostAmount", "D365 Link"]], None
+    return result[["ProdId", "Deviation %", "CostAmount", "RealCostAmount"]], None
+
+
+def render_table(df, d365_url):
+    rows_html = ""
+    for _, row in df.iterrows():
+        pid   = row["ProdId"]
+        dev   = f"{row['Deviation %']:.1f}%"
+        est   = f"{row['CostAmount']:,.0f}"
+        real  = f"{row['RealCostAmount']:,.0f}"
+        color = "color:#c0392b" if row["Deviation %"] > 0 else ("color:#27ae60" if row["Deviation %"] < 0 else "")
+        rows_html += f"""
+        <tr>
+          <td>{pid}</td>
+          <td style="text-align:right;{color}">{dev}</td>
+          <td style="text-align:right">{est}</td>
+          <td style="text-align:right">{real}</td>
+          <td>
+            <button onclick="
+              navigator.clipboard.writeText('{pid}');
+              window.open('{d365_url}','_blank');
+            ">Open</button>
+          </td>
+        </tr>"""
+
+    html = f"""
+    <style>
+      table {{border-collapse:collapse;width:100%;font-family:sans-serif;font-size:13px}}
+      th {{background:#1f4e79;color:white;padding:6px 10px;text-align:left}}
+      td {{padding:5px 10px;border-bottom:1px solid #ddd}}
+      tr:hover td {{background:#f0f4f8}}
+      button {{
+        background:#1f4e79;color:white;border:none;
+        padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px
+      }}
+      button:hover {{background:#2e6da4}}
+      button:active {{background:#27ae60}}
+    </style>
+    <table>
+      <thead><tr>
+        <th>Order</th><th style="text-align:right">Dev %</th>
+        <th style="text-align:right">Estimated</th><th style="text-align:right">Realized</th>
+        <th>Open (copies ID)</th>
+      </tr></thead>
+      <tbody>{rows_html}</tbody>
+    </table>
+    <p style="font-size:11px;color:#888;margin-top:6px">
+      Klik <b>Open</b>: aabner D365 All Production Orders og kopierer ordre-ID til clipboard.
+      Paste (Ctrl+V) i Quick Filter i D365.
+    </p>
+    """
+    return html
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
@@ -121,18 +164,16 @@ if st.button("Refresh data"):
     st.cache_data.clear()
 
 @st.cache_data(ttl=300, show_spinner="Fetching data from D365...")
-def load_data(_v="v13"):
+def load_data(_v="v14"):
     try:
         token = get_token()
     except Exception as e:
         return None, None, f"Auth error: {e}"
-
     prod_ids, err = fetch_raf_order_ids(token)
     if err:
         return None, None, err
     if not prod_ids:
         return set(), None, None
-
     cost_df, _ = fetch_cost_data(token)
     return prod_ids, cost_df, None
 
@@ -143,8 +184,6 @@ if warn:
 if not prod_ids:
     st.error("No Reported as Finished orders found.")
     st.stop()
-
-st.caption(f"Open-links kraever at **d365_helper.py** koerer lokalt (port {HELPER_PORT})")
 
 display_df, err = build_display(prod_ids, cost_df)
 if err:
@@ -159,19 +198,9 @@ with col2:
 
 filtered = display_df[(display_df["Deviation %"] < lo) | (display_df["Deviation %"] > hi)]
 
-st.dataframe(
-    filtered,
-    use_container_width=True,
-    column_config={
-        "ProdId":         st.column_config.TextColumn("Order",      width="small"),
-        "Deviation %":    st.column_config.NumberColumn("Dev %",    format="%.1f %%", width="small"),
-        "CostAmount":     st.column_config.NumberColumn("Estimated", format="%.0f",   width="small"),
-        "RealCostAmount": st.column_config.NumberColumn("Realized",  format="%.0f",   width="small"),
-        "D365 Link":      st.column_config.LinkColumn("D365",        display_text="Open", width="small"),
-    },
-    hide_index=True,
-)
-
-total = len(display_df)
+total     = len(display_df)
 out_range = len(filtered)
 st.caption(f"Showing {out_range} orders outside [{lo:.1f}%, {hi:.1f}%] of {total} total . Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+import streamlit.components.v1 as components
+components.html(render_table(filtered, D365_LIST_URL), height=min(60 + len(filtered) * 34, 800), scrolling=True)
