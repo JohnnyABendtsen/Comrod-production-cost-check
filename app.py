@@ -8,7 +8,7 @@ CLIENT_ID     = st.secrets.get("CLIENT_ID", "")
 CLIENT_SECRET = st.secrets.get("CLIENT_SECRET", "")
 D365_BASE     = "https://comrodgroup-prod.operations.eu.dynamics.com"
 D365_COMPANY  = "COM"
-D365_LINK     = f"{D365_BASE}/?cmp=COM&mi=ProdTable&q=dataAreaId%3DCOM%2CProdId%3D"
+D365_LINK     = f"{D365_BASE}/?cmp=COM&mi=ProdTableListPage&q=ProdId%3D"
 
 def get_token():
     url  = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
@@ -152,3 +152,4 @@ st.dataframe(
     hide_index=True,
 )
 st.caption(f"Showing {len(filtered)} of {len(display_df)} orders | Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
