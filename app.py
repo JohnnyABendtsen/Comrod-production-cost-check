@@ -1,229 +1,288 @@
 import streamlit as st
-import streamlit.components.v1 as components
 import requests
 import pandas as pd
-import io
 from datetime import datetime
 
-TENANT_ID     = st.secrets.get("TENANT_ID", "")
-CLIENT_ID     = st.secrets.get("CLIENT_ID", "")
-CLIENT_SECRET = st.secrets.get("CLIENT_SECRET", "")
-D365_BASE     = "https://comrodgroup-prod.operations.eu.dynamics.com"
-D365_COMPANY  = "COM"
-D365_LIST_URL = f"{D365_BASE}/?cmp={D365_COMPANY}&mi=ProdTableListPage"
+# ── Azure AD / D365 credentials (Streamlit Secrets) ─────────────────────────
+TENANT_ID     = st.secrets.get("TENANT_ID", "YOUR_TENANT_ID")
+CLIENT_ID     = st.secrets.get("CLIENT_ID", "YOUR_CLIENT_ID")
+CLIENT_SECRET = st.secrets.get("CLIENT_SECRET", "YOUR_CLIENT_SECRET")
 
+D365_BASE    = "https://comrodgroup-prod.operations.eu.dynamics.com"
+D365_COMPANY = "COM"
+D365_LINK    = f"{D365_BASE}/?cmp=com&mi=ProdTable&q=ProdId%3D"
+
+
+# ── Auth ─────────────────────────────────────────────────────────────────────
 def get_token():
-    url  = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
-    data = {"grant_type": "client_credentials", "client_id": CLIENT_ID,
-            "client_secret": CLIENT_SECRET, "scope": f"{D365_BASE}/.default"}
-    r = requests.post(url, data=data, timeout=15)
+    url = f"https://login.microsoftonline.com/{TENANT_ID}/oauth2/v2.0/token"
+    data = {
+        "grant_type":    "client_credentials",
+        "client_id":     CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "scope":         f"{D365_BASE}/.default",
+    }
+    r = requests.post(url, data=data, timeout=30)
     r.raise_for_status()
     return r.json()["access_token"]
 
-def fetch_raf_order_ids(token):
+
+# ── Find OData entity name for ProdCalcTrans ─────────────────────────────────
+def find_calc_entity(token):
+    """Query OData metadata to find the entity backed by ProdCalcTrans table."""
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    params = {
-        "$filter": f"dataAreaId eq '{D365_COMPANY}' and ProductionOrderStatus eq 'ReportedFinished'",
-        "$select": "ProductionOrderNumber",
-        "$top": "10000",
-    }
-    r = requests.get(f"{D365_BASE}/data/ProductionOrderHeaders", headers=headers, params=params, timeout=20)
-    if r.status_code == 200:
-        ids = {row["ProductionOrderNumber"] for row in r.json().get("value", [])}
-        if ids:
-            return ids, None
-    params = {
-        "$filter": f"dataAreaId eq '{D365_COMPANY}'",
-        "$select": "ProductionOrderNumber,ProductionOrderStatus",
-        "$top": "10000",
-    }
-    r = requests.get(f"{D365_BASE}/data/ProductionOrderHeaders", headers=headers, params=params, timeout=60)
-    if r.status_code != 200:
-        return None, f"HTTP {r.status_code}: {r.text[:300]}"
-    rows = r.json().get("value", [])
-    ids = {row["ProductionOrderNumber"] for row in rows if row.get("ProductionOrderStatus") == "ReportedFinished"}
-    return ids, None
+    # Try known candidate entity names (OData entity ≠ table name in D365 F&O)
+    candidates = [
+        "ProdCalcTrans",                      # sometimes same as table
+        "ProductionOrderCostLines",
+        "ProductionOrderCostEstimates",
+        "ProdCostEstimates",
+        "ProdCostLines",
+        "ProductionCostEstimateLines",
+        "ProdCalcTransV2",
+        "ProdCalcTransDataEntity",
+    ]
+    for name in candidates:
+        url = f"{D365_BASE}/data/{name}?$top=1&$filter=dataAreaId eq '{D365_COMPANY}'"
+        r = requests.get(url, headers=headers, timeout=15)
+        if r.status_code == 200:
+            return name
+    return None
 
-def fetch_cost_data(token):
+
+# ── Fetch data ────────────────────────────────────────────────────────────────
+def fetch_data(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    all_rows = []
-    skip = 0
-    page_size = 5000
-    while True:
-        params = {
-            "$filter": f"dataAreaId eq '{D365_COMPANY}'",
-            "$select": "CollectRefProdId,CostAmount,RealCostAmount",
-            "$top": str(page_size),
-            "$skip": str(skip),
-        }
-        r = requests.get(f"{D365_BASE}/data/ProdCalcTransBiEntities", headers=headers, params=params, timeout=60)
-        if r.status_code != 200:
-            return None, f"HTTP {r.status_code}: {r.text[:400]}"
-        batch = r.json().get("value", [])
-        all_rows.extend(batch)
-        if len(batch) < page_size:
-            break
-        skip += page_size
-    return pd.DataFrame(all_rows), None
 
-def build_display(prod_ids, cost_df):
-    base = pd.DataFrame({"ProdId": sorted(prod_ids)})
-    if cost_df is not None and not cost_df.empty:
-        df = cost_df.copy()
-        df.rename(columns={"CollectRefProdId": "ProdId"}, inplace=True)
-        df["CostAmount"]     = pd.to_numeric(df["CostAmount"],     errors="coerce").fillna(0)
-        df["RealCostAmount"] = pd.to_numeric(df["RealCostAmount"], errors="coerce").fillna(0)
-        df = df[df["ProdId"].isin(prod_ids)]
-        agg = df.groupby("ProdId", as_index=False).agg(
-            CostAmount=("CostAmount", "sum"),
-            RealCostAmount=("RealCostAmount", "sum")
-        )
-        result = base.merge(agg, on="ProdId", how="left").fillna(0)
-    else:
-        result = base.copy()
-        result["CostAmount"]     = 0.0
-        result["RealCostAmount"] = 0.0
-    result["Deviation %"] = (
-        (result["RealCostAmount"] - result["CostAmount"])
-        / result["CostAmount"].replace(0, float("nan")) * 100
-    ).round(2)
-    result.sort_values("Deviation %", ascending=False, inplace=True, ignore_index=True)
-    return result[["ProdId", "Deviation %", "CostAmount", "RealCostAmount"]]
-
-def to_excel(df):
-    buf = io.BytesIO()
-    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
-        export = df.copy()
-        export.columns = ["Production Order", "Deviation %", "Estimated Cost", "Realized Cost"]
-        export.to_excel(writer, index=False, sheet_name="Cost Deviation")
-        ws = writer.sheets["Cost Deviation"]
-        for col in ws.columns:
-            max_len = max(len(str(col[0].value)), max((len(str(c.value or "")) for c in col[1:]), default=0))
-            ws.column_dimensions[col[0].column_letter].width = max_len + 4
-    return buf.getvalue()
-
-def render_table(df, d365_url):
-    esc = lambda s: str(s).replace("&","&amp;").replace("<","&lt;").replace('"','&quot;')
-    rows_html = ""
-    for _, row in df.iterrows():
-        pid  = esc(row["ProdId"])
-        dev  = row["Deviation %"]
-        est  = f"{row['CostAmount']:,.0f}"
-        real = f"{row['RealCostAmount']:,.0f}"
-        color = "red" if dev > 0 else "#1a7f37"
-        dev_str = f"{dev:.1f}%"
-        rows_html += f"""<tr>
-  <td style="white-space:nowrap;padding:4px 10px">{pid}</td>
-  <td style="white-space:nowrap;padding:4px 10px;color:{color};text-align:right">{dev_str}</td>
-  <td style="white-space:nowrap;padding:4px 10px;text-align:right">{est}</td>
-  <td style="white-space:nowrap;padding:4px 10px;text-align:right">{real}</td>
-  <td style="white-space:nowrap;padding:4px 10px">
-    <button onclick="navigator.clipboard.writeText('{pid}');window.open('{d365_url}','_blank')"
-      style="background:#1f4e79;color:white;border:none;padding:3px 10px;border-radius:4px;cursor:pointer">Open</button>
-  </td>
-</tr>"""
-    return f"""<table style="border-collapse:collapse;width:auto;font-size:14px">
-<thead><tr style="background:#1f4e79;color:white">
-  <th style="padding:6px 10px;text-align:left;white-space:nowrap">Order</th>
-  <th style="padding:6px 10px;text-align:right;white-space:nowrap">Dev %</th>
-  <th style="padding:6px 10px;text-align:right;white-space:nowrap">Estimated</th>
-  <th style="padding:6px 10px;text-align:right;white-space:nowrap">Realized</th>
-  <th style="padding:6px 10px;text-align:left;white-space:nowrap">Open (copies ID)</th>
-</tr></thead>
-<tbody>{rows_html}</tbody>
-</table>"""
-
-# ── UI ────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Comrod - Production Cost Deviation", layout="wide")
-st.title("Comrod - Production Order Cost Deviation")
-st.markdown("## Powered by Inspirit365")
-st.caption("Status: **Reported as Finished** · Shows orders **outside** the deviation range")
-
-st.markdown("""<style>
-div[data-testid="stNumberInput"] { max-width: 200px; }
-</style>""", unsafe_allow_html=True)
-
-# Read lo/hi from URL params (set by JS redirect from localStorage on fresh load)
-qp = st.query_params
-_lo_default = float(qp.get("lo", -10.0))
-_hi_default = float(qp.get("hi",  10.0))
-
-@st.cache_data(ttl=300, show_spinner="Fetching data from D365...")
-def load_data(_v="v27"):
-    try:
-        token = get_token()
-    except Exception as e:
-        return None, None, f"Auth error: {e}"
-    prod_ids, err = fetch_raf_order_ids(token)
-    if err:
-        return None, None, err
-    if not prod_ids:
-        return set(), None, None
-    cost_df, _ = fetch_cost_data(token)
-    return prod_ids, cost_df, None
-
-prod_ids, cost_df, warn = load_data()
-if warn:
-    st.error(warn)
-    st.stop()
-if not prod_ids:
-    st.error("No Reported as Finished orders found.")
-    st.stop()
-
-display_df = build_display(prod_ids, cost_df)
-
-col1, col2 = st.columns([1, 9])
-with col1:
-    lo = st.number_input("Min dev %", value=_lo_default, step=1.0, format="%.1f")
-with col2:
-    hi = st.number_input("Max dev %", value=_hi_default, step=1.0, format="%.1f")
-
-# Persist current values to URL + localStorage via JS
-st.query_params["lo"] = str(lo)
-st.query_params["hi"] = str(hi)
-
-# JS: save params to localStorage; on fresh load (no params) redirect from localStorage
-components.html(f"""
-<script>
-(function(){{
-  try {{
-    var parent = window.parent;
-    var p = new URLSearchParams(parent.location.search);
-    if (p.has('lo')) {{
-      // URL has values - save to localStorage
-      parent.localStorage.setItem('dev_lo', p.get('lo'));
-      parent.localStorage.setItem('dev_hi', p.get('hi') || '10.0');
-    }} else {{
-      // No URL params - check localStorage and redirect
-      var slo = parent.localStorage.getItem('dev_lo');
-      var shi = parent.localStorage.getItem('dev_hi');
-      if (slo !== null && shi !== null) {{
-        parent.location.href = parent.location.pathname + '?lo=' + slo + '&hi=' + shi;
-      }}
-    }}
-  }} catch(e) {{}}
-}})();
-</script>
-""", height=1)
-
-filtered = display_df[(display_df["Deviation %"] < lo) | (display_df["Deviation %"] > hi)].reset_index(drop=True)
-
-total     = len(display_df)
-out_range = len(filtered)
-st.caption(f"Showing {out_range} orders outside [{lo:.1f}%, {hi:.1f}%] of {total} total · Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-
-rb_col, ex_col, _ = st.columns([1, 1, 8])
-with rb_col:
-    if st.button("Refresh data"):
-        st.cache_data.clear()
-        st.rerun()
-with ex_col:
-    st.download_button(
-        label="⬇️ Export to Excel",
-        data=to_excel(filtered),
-        file_name=f"cost_deviation_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    # 1. ProdTable – Reported as Finished
+    prod_url = (
+        f"{D365_BASE}/data/ProdTable"
+        f"?$filter=dataAreaId eq '{D365_COMPANY}' and ProdStatus eq 'ReportedAsFinished'"
+        f"&$select=ProdId,ItemId,Pool"
+        f"&$top=5000"
     )
+    r = requests.get(prod_url, headers=headers, timeout=60)
+    r.raise_for_status()
+    prod = pd.DataFrame(r.json().get("value", []))
 
-components.html(render_table(filtered, D365_LIST_URL),
-                height=min(80 + len(filtered) * 34, 800), scrolling=True)
+    if prod.empty:
+        return pd.DataFrame(), None
+
+    # 2. Find cost entity
+    entity = find_calc_entity(token)
+    calc = pd.DataFrame()
+
+    if entity:
+        calc_url = (
+            f"{D365_BASE}/data/{entity}"
+            f"?$filter=dataAreaId eq '{D365_COMPANY}'"
+            f"&$top=5000"
+        )
+        r2 = requests.get(calc_url, headers=headers, timeout=60)
+        if r2.status_code == 200:
+            calc = pd.DataFrame(r2.json().get("value", []))
+
+    # 3. Fallback: try cost fields directly on ProdTable
+    if calc.empty:
+        ext_url = (
+            f"{D365_BASE}/data/ProdTable"
+            f"?$filter=dataAreaId eq '{D365_COMPANY}' and ProdStatus eq 'ReportedAsFinished'"
+            f"&$select=ProdId,ItemId,CostAmount,RealCostAmount,ProdQty"
+            f"&$top=5000"
+        )
+        r3 = requests.get(ext_url, headers=headers, timeout=60)
+        r3.raise_for_status()
+        calc = pd.DataFrame(r3.json().get("value", []))
+        if not calc.empty:
+            calc = calc.rename(columns={"ProdQty": "Qty"})
+            df = calc.copy()
+    else:
+        # Normalise column names
+        col_map = {}
+        for c in calc.columns:
+            cl = c.lower()
+            if "prodid" in cl or "productionorder" in cl:
+                col_map[c] = "ProdId"
+            elif cl == "costamount" or "estimatedcost" in cl:
+                col_map[c] = "CostAmount"
+            elif "realcost" in cl or "actualcost" in cl:
+                col_map[c] = "RealCostAmount"
+            elif cl in ("qty", "quantity", "prodqty"):
+                col_map[c] = "Qty"
+        calc = calc.rename(columns=col_map)
+        df = calc.merge(prod[["ProdId", "ItemId", "Pool"]], on="ProdId", how="inner")
+
+    if "ProdId" not in calc.columns or calc.empty:
+        return pd.DataFrame(), entity
+
+    if "ItemId" not in df.columns:
+        df = df.merge(prod[["ProdId", "ItemId", "Pool"]], on="ProdId", how="left")
+    elif "Pool" not in df.columns:
+        df = df.merge(prod[["ProdId", "Pool"]], on="ProdId", how="left")
+
+    # 4. ReleasedProductsV2 – product names
+    items = df["ItemId"].dropna().unique().tolist()
+    if items:
+        filter_str = " or ".join([f"ItemNumber eq '{i}'" for i in items[:200]])
+        ri = requests.get(
+            f"{D365_BASE}/data/ReleasedProductsV2?$filter=({filter_str})&$select=ItemNumber,ProductName",
+            headers=headers, timeout=60
+        )
+        if ri.status_code == 200:
+            idf = pd.DataFrame(ri.json().get("value", [])).rename(columns={"ItemNumber": "ItemId"})
+            df = df.merge(idf, on="ItemId", how="left")
+        else:
+            df["ProductName"] = df["ItemId"]
+    else:
+        df["ProductName"] = ""
+
+    # 5. Aggregate
+    for col in ["CostAmount", "RealCostAmount", "Qty"]:
+        if col not in df.columns:
+            df[col] = 0.0
+
+    agg = df.groupby(["ProdId", "ProductName", "Pool"], as_index=False).agg(
+        CostAmount=("CostAmount", "sum"),
+        RealCostAmount=("RealCostAmount", "sum"),
+        Qty=("Qty", "sum"),
+    )
+    agg["Afvigelse_%"] = (
+        (agg["RealCostAmount"] - agg["CostAmount"]) / agg["CostAmount"].abs() * 100
+    ).round(1)
+
+    return agg[["ProdId", "ProductName", "Pool", "Afvigelse_%", "Qty", "CostAmount", "RealCostAmount"]], entity
+
+
+# ── Sample data ───────────────────────────────────────────────────────────────
+SAMPLE = pd.DataFrame([
+    {"ProdId": "P-10042", "ProductName": "Antenna VHF 108",  "Afvigelse_%":  18.4, "Qty": 120, "CostAmount": 45200, "RealCostAmount": 53511},
+    {"ProdId": "P-10039", "ProductName": "Cable Assy 15m",   "Afvigelse_%":   7.2, "Qty":  80, "CostAmount": 12800, "RealCostAmount": 13722},
+    {"ProdId": "P-10035", "ProductName": "Whip Antenna 3m",  "Afvigelse_%":  -3.1, "Qty": 200, "CostAmount": 31000, "RealCostAmount": 30039},
+    {"ProdId": "P-10031", "ProductName": "Mast Mount Kit",   "Afvigelse_%":  12.0, "Qty":  60, "CostAmount": 18600, "RealCostAmount": 20832},
+    {"ProdId": "P-10028", "ProductName": "Broadband Antenna", "Afvigelse_%": -8.5, "Qty":  45, "CostAmount": 67500, "RealCostAmount": 61763},
+    {"ProdId": "P-10021", "ProductName": "Coax Cable 5m",    "Afvigelse_%":   5.9, "Qty": 300, "CostAmount":  9000, "RealCostAmount":  9531},
+    {"ProdId": "P-10017", "ProductName": "SATCOM Terminal",  "Afvigelse_%":  22.3, "Qty":  10, "CostAmount": 85000, "RealCostAmount": 103955},
+])
+
+
+# ── Page config ───────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="Comrod · Produktionsordre Kostprisafvigelse",
+    page_icon="🏭",
+    layout="wide",
+)
+st.markdown("""
+<style>
+  .kpi-box{background:#F8FAFC;border:1px solid #E2E8F0;border-radius:8px;padding:16px 20px;text-align:center}
+  .kpi-label{font-size:12px;color:#64748B;font-weight:600;text-transform:uppercase;letter-spacing:.06em}
+  .kpi-value{font-size:28px;font-weight:700;color:#1A2332;line-height:1.2}
+  .kpi-value.red{color:#DC2626} .kpi-value.green{color:#16A34A}
+  a{text-decoration:none;color:#0078D4;font-weight:500} a:hover{text-decoration:underline}
+  [data-testid="stAppViewContainer"]{background:#F8FAFC}
+</style>
+""", unsafe_allow_html=True)
+
+col_h1, col_h2 = st.columns([5, 1])
+with col_h1:
+    st.markdown("#### 🏭 Comrod Group — Produktionsordre Kostprisafvigelse")
+    st.caption("Kun ordrer med status *Reported as Finished* · Klik ProdId for at åbne ordren i D365 F&O")
+with col_h2:
+    refresh = st.button("🔄 Opdater nu", use_container_width=True)
+
+creds_ok = not any(v.startswith("YOUR_") for v in [TENANT_ID, CLIENT_ID, CLIENT_SECRET])
+
+@st.cache_data(ttl=600, show_spinner="Henter data fra D365 F&O …")
+def load(_t):
+    token = get_token()
+    return fetch_data(token), datetime.now().strftime("%d-%m-%Y %H:%M")
+
+if refresh:
+    st.cache_data.clear()
+
+entity_used = None
+if creds_ok:
+    try:
+        (df, entity_used), last_updated = load(0)
+        sample_mode = False
+    except Exception as e:
+        st.error(f"D365 F&O fejl: {e}")
+        df, last_updated = SAMPLE.copy(), "— (fejl, viser demo-data)"
+        sample_mode = True
+else:
+    df = SAMPLE.copy()
+    last_updated = "— (demo-data, mangler credentials)"
+    sample_mode = True
+
+if sample_mode:
+    st.warning("⚠️ Viser demo-data — TENANT_ID / CLIENT_ID / CLIENT_SECRET er ikke sat som secrets.")
+if entity_used:
+    st.caption(f"OData entity: `{entity_used}`")
+
+st.caption(f"Sidst opdateret: {last_updated}")
+
+if df.empty:
+    st.info("Ingen ordrer fundet — tjek OData entitetsnavn og D365 adgang.")
+    st.stop()
+
+total   = len(df)
+avg_dev = df["Afvigelse_%"].mean()
+max_dev = df["Afvigelse_%"].max()
+under   = (df["Afvigelse_%"] < 0).sum()
+
+k1, k2, k3, k4 = st.columns(4)
+with k1:
+    st.markdown(f'<div class="kpi-box"><div class="kpi-label">Ordrer</div><div class="kpi-value">{total}</div></div>', unsafe_allow_html=True)
+with k2:
+    cls = "red" if avg_dev > 0 else "green"
+    st.markdown(f'<div class="kpi-box"><div class="kpi-label">Gns. afvigelse</div><div class="kpi-value {cls}">{avg_dev:+.1f}%</div></div>', unsafe_allow_html=True)
+with k3:
+    st.markdown(f'<div class="kpi-box"><div class="kpi-label">Maks. afvigelse</div><div class="kpi-value red">{max_dev:+.1f}%</div></div>', unsafe_allow_html=True)
+with k4:
+    st.markdown(f'<div class="kpi-box"><div class="kpi-label">Under budget</div><div class="kpi-value green">{under}</div></div>', unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+filter_opt = st.radio("Filter", ["Alle", "Høj >10%", "Middel 5-10%", "Lav <5%", "Under budget"],
+                      horizontal=True, label_visibility="collapsed")
+fdf = df.copy()
+if filter_opt == "Høj >10%":      fdf = fdf[fdf["Afvigelse_%"] > 10]
+elif filter_opt == "Middel 5-10%": fdf = fdf[(fdf["Afvigelse_%"] >= 5) & (fdf["Afvigelse_%"] <= 10)]
+elif filter_opt == "Lav <5%":      fdf = fdf[(fdf["Afvigelse_%"] >= 0) & (fdf["Afvigelse_%"] < 5)]
+elif filter_opt == "Under budget":  fdf = fdf[fdf["Afvigelse_%"] < 0]
+fdf = fdf.sort_values("Afvigelse_%", ascending=False).reset_index(drop=True)
+
+search = st.text_input("🔍 Søg ProdId eller Produktnavn", placeholder="fx P-10042 eller Antenna")
+if search:
+    fdf = fdf[fdf["ProdId"].str.contains(search, case=False, na=False) |
+              fdf["ProductName"].str.contains(search, case=False, na=False)]
+
+def color_dev(v):
+    if v > 10: return "color:#DC2626;font-weight:600"
+    if v > 0:  return "color:#D97706;font-weight:500"
+    return "color:#16A34A;font-weight:500"
+
+rows = "\n".join(
+    f"<tr><td><a href='{D365_LINK}{r.ProdId}' target='_blank'>{r.ProdId}</a></td>"
+    f"<td>{getattr(r, 'Pool', '') or ''}</td>"
+    f"<td>{r.ProductName}</td>"
+    f"<td style='text-align:right'><span style='{color_dev(r['Afvigelse_%'])}'>{r['Afvigelse_%']:+.1f}%</span></td>"
+    f"<td style='text-align:right'>{r.Qty:,.0f}</td>"
+    f"<td style='text-align:right'>{r.CostAmount:,.0f} kr</td>"
+    f"<td style='text-align:right'>{r.RealCostAmount:,.0f} kr</td></tr>"
+    for r in fdf.itertuples()
+)
+st.markdown(f"""
+<table style="width:100%;border-collapse:collapse;font-size:14px">
+  <thead><tr style="border-bottom:2px solid #E2E8F0;color:#64748B;font-size:12px;text-transform:uppercase;letter-spacing:.05em">
+    <th style="padding:8px 12px;text-align:left">ProdId</th>
+    <th style="padding:8px 12px;text-align:left">Pool</th>
+    <th style="padding:8px 12px;text-align:left">Produktnavn</th>
+    <th style="padding:8px 12px;text-align:right">Afvigelse %</th>
+    <th style="padding:8px 12px;text-align:right">Antal</th>
+    <th style="padding:8px 12px;text-align:right">Estimeret</th>
+    <th style="padding:8px 12px;text-align:right">Realiseret</th>
+  </tr></thead>
+  <tbody>{rows}</tbody>
+</table>
+""", unsafe_allow_html=True)
+st.caption(f"{len(fdf)} ordre(r) vist")
