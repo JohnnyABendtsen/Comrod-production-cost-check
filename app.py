@@ -54,16 +54,21 @@ def find_calc_entity(token):
 def fetch_data(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-    # 1. ProdTable – Reported as Finished
+    # 1. ProdTable – Reported as Finished (Pool-felt hedder ProdPoolId i OData)
     prod_url = (
         f"{D365_BASE}/data/ProdTable"
         f"?$filter=dataAreaId eq '{D365_COMPANY}' and ProdStatus eq 'ReportedAsFinished'"
-        f"&$select=ProdId,ItemId,Pool"
+        f"&$select=ProdId,ItemId,ProdPoolId"
         f"&$top=5000"
     )
     r = requests.get(prod_url, headers=headers, timeout=60)
     r.raise_for_status()
     prod = pd.DataFrame(r.json().get("value", []))
+    if "ProdPoolId" in prod.columns:
+        prod = prod.rename(columns={"ProdPoolId": "Pool"})
+    else:
+        prod["Pool"] = ""
+    prod["Pool"] = prod["Pool"].fillna("")
 
     if prod.empty:
         return pd.DataFrame(), None
@@ -154,13 +159,13 @@ def fetch_data(token):
 
 # ── Sample data ───────────────────────────────────────────────────────────────
 SAMPLE = pd.DataFrame([
-    {"ProdId": "P-10042", "ProductName": "Antenna VHF 108",  "Afvigelse_%":  18.4, "Qty": 120, "CostAmount": 45200, "RealCostAmount": 53511},
-    {"ProdId": "P-10039", "ProductName": "Cable Assy 15m",   "Afvigelse_%":   7.2, "Qty":  80, "CostAmount": 12800, "RealCostAmount": 13722},
-    {"ProdId": "P-10035", "ProductName": "Whip Antenna 3m",  "Afvigelse_%":  -3.1, "Qty": 200, "CostAmount": 31000, "RealCostAmount": 30039},
-    {"ProdId": "P-10031", "ProductName": "Mast Mount Kit",   "Afvigelse_%":  12.0, "Qty":  60, "CostAmount": 18600, "RealCostAmount": 20832},
-    {"ProdId": "P-10028", "ProductName": "Broadband Antenna", "Afvigelse_%": -8.5, "Qty":  45, "CostAmount": 67500, "RealCostAmount": 61763},
-    {"ProdId": "P-10021", "ProductName": "Coax Cable 5m",    "Afvigelse_%":   5.9, "Qty": 300, "CostAmount":  9000, "RealCostAmount":  9531},
-    {"ProdId": "P-10017", "ProductName": "SATCOM Terminal",  "Afvigelse_%":  22.3, "Qty":  10, "CostAmount": 85000, "RealCostAmount": 103955},
+    {"ProdId": "P-10042", "ProductName": "Antenna VHF 108",  "Pool": "POOL1", "Afvigelse_%":  18.4, "Qty": 120, "CostAmount": 45200, "RealCostAmount": 53511},
+    {"ProdId": "P-10039", "ProductName": "Cable Assy 15m",   "Pool": "POOL1", "Afvigelse_%":   7.2, "Qty":  80, "CostAmount": 12800, "RealCostAmount": 13722},
+    {"ProdId": "P-10035", "ProductName": "Whip Antenna 3m",  "Pool": "POOL2", "Afvigelse_%":  -3.1, "Qty": 200, "CostAmount": 31000, "RealCostAmount": 30039},
+    {"ProdId": "P-10031", "ProductName": "Mast Mount Kit",   "Pool": "POOL2", "Afvigelse_%":  12.0, "Qty":  60, "CostAmount": 18600, "RealCostAmount": 20832},
+    {"ProdId": "P-10028", "ProductName": "Broadband Antenna","Pool": "POOL3", "Afvigelse_%":  -8.5, "Qty":  45, "CostAmount": 67500, "RealCostAmount": 61763},
+    {"ProdId": "P-10021", "ProductName": "Coax Cable 5m",    "Pool": "POOL3", "Afvigelse_%":   5.9, "Qty": 300, "CostAmount":  9000, "RealCostAmount":  9531},
+    {"ProdId": "P-10017", "ProductName": "SATCOM Terminal",  "Pool": "POOL4", "Afvigelse_%":  22.3, "Qty":  10, "CostAmount": 85000, "RealCostAmount": 103955},
 ])
 
 
