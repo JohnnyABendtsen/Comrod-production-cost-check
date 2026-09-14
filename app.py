@@ -54,24 +54,36 @@ def find_calc_entity(token):
 def fetch_data(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-    # 1. ProdTable – Reported as Finished (Pool-felt hedder ProdPoolId i OData)
+    # 1. ProdTable – Reported as Finished (ingen Pool i $select – hentes fra ProductionOrderHeaders)
     prod_url = (
         f"{D365_BASE}/data/ProdTable"
         f"?$filter=dataAreaId eq '{D365_COMPANY}' and ProdStatus eq 'ReportedAsFinished'"
-        f"&$select=ProdId,ItemId,ProdPoolId"
+        f"&$select=ProdId,ItemId"
         f"&$top=5000"
     )
     r = requests.get(prod_url, headers=headers, timeout=60)
     r.raise_for_status()
     prod = pd.DataFrame(r.json().get("value", []))
-    if "ProdPoolId" in prod.columns:
-        prod = prod.rename(columns={"ProdPoolId": "Pool"})
-    else:
-        prod["Pool"] = ""
-    prod["Pool"] = prod["Pool"].fillna("")
 
     if prod.empty:
         return pd.DataFrame(), None
+
+    # 2. Pool fra ProductionOrderHeaders (felt: ProductionPool – bekræftet i v28)
+    pool_url = (
+        f"{D365_BASE}/data/ProductionOrderHeaders"
+        f"?$filter=dataAreaId eq '{D365_COMPANY}' and ProductionOrderStatus eq 'ReportedFinished'"
+        f"&$select=ProductionOrderNumber,ProductionPool"
+        f"&$top=5000"
+    )
+    rp = requests.get(pool_url, headers=headers, timeout=30)
+    if rp.status_code == 200:
+        pool_df = pd.DataFrame(rp.json().get("value", []))
+        if not pool_df.empty:
+            pool_df = pool_df.rename(columns={"ProductionOrderNumber": "ProdId", "ProductionPool": "Pool"})
+            prod = prod.merge(pool_df[["ProdId", "Pool"]], on="ProdId", how="left")
+    if "Pool" not in prod.columns:
+        prod["Pool"] = ""
+    prod["Pool"] = prod["Pool"].fillna("")
 
     # 2. Find cost entity
     entity = find_calc_entity(token)
@@ -267,17 +279,18 @@ def color_dev(v):
     if v > 0:  return "color:#D97706;font-weight:500"
     return "color:#16A34A;font-weight:500"
 
+_fdf = fdf.rename(columns={"Afvigelse_%": "Afvigelse_pct"})
 rows = "\n".join(
     f"<tr>"
     f"<td style='padding:8px 12px'><a href='{D365_LINK}{r.ProdId}' target='_blank'>{r.ProdId}</a></td>"
-    f"<td style='padding:8px 12px'>{getattr(r, 'Pool', '') or ''}</td>"
+    f"<td style='padding:8px 12px'>{r.Pool or ''}</td>"
     f"<td style='padding:8px 12px'>{r.ProductName}</td>"
-    f"<td style='text-align:right;padding:8px 12px' data-val='{r.Afvigelse__}'><span style='{color_dev(r.Afvigelse__)}'>{r.Afvigelse__:+.1f}%</span></td>"
+    f"<td style='text-align:right;padding:8px 12px' data-val='{r.Afvigelse_pct}'><span style='{color_dev(r.Afvigelse_pct)}'>{r.Afvigelse_pct:+.1f}%</span></td>"
     f"<td style='text-align:right;padding:8px 12px' data-val='{r.Qty}'>{r.Qty:,.0f}</td>"
     f"<td style='text-align:right;padding:8px 12px' data-val='{r.CostAmount}'>{r.CostAmount:,.0f} kr</td>"
     f"<td style='text-align:right;padding:8px 12px' data-val='{r.RealCostAmount}'>{r.RealCostAmount:,.0f} kr</td>"
     f"</tr>"
-    for r in fdf.itertuples()
+    for r in _fdf.itertuples()
 )
 
 table_html = f"""
