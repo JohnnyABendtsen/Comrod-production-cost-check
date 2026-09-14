@@ -20,29 +20,37 @@ def get_token():
     r.raise_for_status()
     return r.json()["access_token"]
 
+def _pick_pool(row):
+    """Try most likely OData field names for ProdPoolId in order."""
+    for f in ("ProductionPoolId", "ProductionPool", "ProdPoolId"):
+        v = row.get(f, "")
+        if v:
+            return v
+    return ""
+
 def fetch_raf_order_ids(token):
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     params = {
         "$filter": f"dataAreaId eq '{D365_COMPANY}' and ProductionOrderStatus eq 'ReportedFinished'",
-        "$select": "ProductionOrderNumber,ProductionPool",
+        "$select": "ProductionOrderNumber,ProductionPoolId,ProductionPool,ProdPoolId",
         "$top": "10000",
     }
     r = requests.get(f"{D365_BASE}/data/ProductionOrderHeaders", headers=headers, params=params, timeout=20)
     if r.status_code == 200:
         rows = r.json().get("value", [])
-        id_pool = {row["ProductionOrderNumber"]: row.get("ProductionPool", "") for row in rows}
+        id_pool = {row["ProductionOrderNumber"]: _pick_pool(row) for row in rows}
         if id_pool:
             return id_pool, None
     params = {
         "$filter": f"dataAreaId eq '{D365_COMPANY}'",
-        "$select": "ProductionOrderNumber,ProductionOrderStatus,ProductionPool",
+        "$select": "ProductionOrderNumber,ProductionOrderStatus,ProductionPoolId,ProductionPool,ProdPoolId",
         "$top": "10000",
     }
     r = requests.get(f"{D365_BASE}/data/ProductionOrderHeaders", headers=headers, params=params, timeout=60)
     if r.status_code != 200:
         return None, f"HTTP {r.status_code}: {r.text[:300]}"
     rows = r.json().get("value", [])
-    id_pool = {row["ProductionOrderNumber"]: row.get("ProductionPool", "")
+    id_pool = {row["ProductionOrderNumber"]: _pick_pool(row)
                for row in rows if row.get("ProductionOrderStatus") == "ReportedFinished"}
     return id_pool, None
 
